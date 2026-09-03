@@ -1,0 +1,154 @@
+# Appendix 4: Glossary
+
+## A
+
+**AI Business Cluster (Cluster)**
+: A logical backend unit that references a Provider and configures forwarding policies, determining how traffic is forwarded, which models are used, and how Key weights are distributed.
+
+**AI Gateway Instance Pool**
+: The list of Data Plane BFE engine addresses registered in the Dashboard, used by the Control Plane to push configurations to designated BFE nodes.
+
+**API Key**
+: The credential used by callers to access Rainway AI Gateway, carried in the request header (no Bearer prefix required). It can be attached to an Entity to inherit quota, rate limiting, and routing policies.
+
+## B
+
+**BFE**
+: Baidu's open-source Layer-7 load balancer and traffic gateway. In Rainway AI Gateway, it serves as the Data Plane forwarding engine, responsible for authentication, rate limiting, quota enforcement, routing, and forwarding of AI requests.
+
+**Balancer**
+: BFE's load balancing module, responsible for distributing requests among multiple backend instances within a Cluster.
+
+## C
+
+**Cluster**
+: See "AI Business Cluster".
+
+**Conf Agent (Configuration Agent)**
+: A component deployed alongside BFE that periodically pulls the latest configuration from AI Gateway API, writes it to a local version directory, and triggers BFE hot reload.
+
+**Condition (Conditional Expression)**
+: The expression language provided by BFE. AI routing rules describe matching conditions via the `Cond` field, e.g., `req_body_json_in("model", "gpt-4", false)`.
+
+## D
+
+**Dashboard**
+: The web administration interface of Rainway AI Gateway, providing operations staff with resource management, consumer management, routing management, user management, and other features.
+
+## E
+
+**Entity (Organization)**
+: A grouping of callers that can represent a department, team, or project. Each Entity can have quota plans, rate limit policies, model allowlists/blocklists, and routing rules attached.
+
+**Entity Type (Organization Type)**
+: The hierarchical classification definition of an Entity, distinguishing levels via the `level` field; the smaller the value, the higher the level.
+
+## F
+
+**Fallback (Degradation)**
+: The backup target specified by `fallbacks` in an AI routing rule. When all preferred `targets` fail, fallback targets are tried in order.
+
+## G
+
+**Global Route Table**
+: The bottom-level fallback rules in the three-tier AI routing rule system; every API-Key is ultimately bound to and looked up against it.
+
+## I
+
+**InnerAPI**
+: The internal interfaces provided by AI Gateway API, mainly used by Conf Agent and BFE to pull configurations and complete version synchronization.
+
+**Instance Pool**
+: The set of real backend AI service addresses, ports, and weights defined within a Provider, referenced by Clusters.
+
+## K
+
+**Key Affinity**
+: Session-level Key affinity implemented based on Redis; the same `ClientKeyId` keeps hitting the same Provider Key within a certain period of time.
+
+## M
+
+**Model Mapping**
+: The mechanism in a Cluster that maps the model name in a user's request to the model name actually used by the backend.
+
+**Model Price**
+: Maintains the price of a model under different Providers and time periods, used for RMB quota cost accounting.
+
+**Model Protocol**
+: The upstream protocol types supported by a Provider, such as `openai`, `anthropic`, etc., used for request/response body protocol adaptation.
+
+## O
+
+**OpenAPI**
+: The external management interfaces provided by AI Gateway API, called by the Dashboard and external programs to create, query, update, and delete resources.
+
+## P
+
+**Provider (Model Service Provider)**
+: A resource holding the backend instance pool, model protocols, model list, and plaintext service authentication Keys; a Cluster references a Provider via its owning-provider field.
+
+**Product (Product Line)**
+: The top-level resource isolation unit in BFE; in AI Gateway mode it is mainly used for product line identification and configuration context loading.
+
+## Q
+
+**Quota Plan**
+: The total Token amount or RMB budget allocated to an API-Key or Entity, supporting two units, `total_token` and `RMB`, with periodic reset.
+
+## R
+
+**RateLimitPolicy (Rate Limit Policy)**
+: A policy controlling the rate at which an API-Key or Entity accesses backend AI models, supporting TPM, RPM, and maximum concurrency limits.
+
+**Redis as the Single Source of Truth**
+: Runtime state such as quota balances and rate limit counters is read from and written to Redis directly; the management plane no longer maintains a cold database copy when querying balances.
+
+**Route Rule**
+: A single rule in the AI route table, containing a `Cond` matching condition, a `targets` destination list, and an optional `fallbacks` fallback list.
+
+**Route Table**
+: The three-tier AI routing rule collection of Global / Entity / API-Key, matched in priority order `apikey > entity > global`.
+
+## S
+
+**Session Key**
+: The session credential generated by `/auth/session-keys` after Dashboard login, in the format `Authorization: Session {session_key}`.
+
+**Sticky Session**
+: A mechanism that binds requests from the same client to the same backend instance for a long period; it is usually unnecessary in AI scenarios.
+
+**Sub Cluster**
+: A sub-cluster automatically created when a Cluster generates BFE configuration, bound to the instance pool corresponding to the Cluster.
+
+## T
+
+**Tier (Time Period Level)**
+: The price level divided by time dimension in model pricing, such as `peak` and `off-peak`, used for time-based billing.
+
+**Token**
+: A programmatic access credential created via `/auth/tokens`, with two Scopes: `System` (full management permissions) and `Support` (read-only export permissions).
+
+**TPM (Tokens Per Minute)**
+: The upper limit of Token consumption per minute, using sliding window counting.
+
+**RPM (Requests Per Minute)**
+: The upper limit of requests per minute, using fixed window counting.
+
+## V
+
+**VersionControlManager**
+: The component in AI Gateway API responsible for configuration export, MD5 signatures, and version number management.
+
+**Visitor**
+: The unified abstraction of users and Tokens in the AI Gateway API authentication and authorization module.
+
+## W
+
+**Weighted Random**
+: The algorithm by which an AI routing rule randomly selects a target Cluster among `targets` according to weights.
+
+## References
+
+- `ai-gateway-web/docs/zh-cn/12-appendix.md`
+- `ai-gateway-api/design-docs/api-define/OpenAPI接口定义/README.md`
+- `bfe/docs/zh_cn/sys_design/ai_error_codes.md`
