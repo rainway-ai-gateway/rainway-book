@@ -94,7 +94,7 @@ Rainway AI Gateway consists of five core components working together:
 | **Dashboard** | Management Console | Web-based visual management interface; performs configuration operations via OpenAPI |
 | **BFE** | Data Plane | Handles traffic forwarding, access control, AI routing, quota validation, rate limit enforcement, etc. |
 | **Conf Agent** | Configuration Agent | Pulls the latest configuration from InnerAPI and triggers BFE hot reload without restarting the Data Plane |
-| **ai-gateway-controller** | Service Discovery | In Kubernetes, reports Ready instances of Services/Endpoints as a K8s pool (InnerAPI `k8s_pools`); the Control Plane fans it out to the Provider mirror and Cluster derived pools, which are exported to BFE via `cluster_table` |
+| **ai-gateway-controller** | Service Discovery | In Kubernetes, reports Ready instances of Services/Endpoints as a K8s pool (InnerAPI `k8s_pools`); the Control Plane resolves the effective pool on demand by `k8s_pool_name`, which is exported to BFE via `cluster_table` |
 
 The relationship among these five components is summarized in the following diagram:
 
@@ -159,7 +159,7 @@ Conf Agent is deployed on BFE nodes and periodically pulls the latest configurat
 
 ### ai-gateway-controller
 
-ai-gateway-controller is a controller (built on controller-runtime) deployed inside a Kubernetes cluster. It watches Services carrying the `ai-gateway-api-name` label together with their same-named Endpoints, and for each named port reports the Ready backend instances in full via the InnerAPI `PUT /inner-api/v1/k8s_pools/{name}/instances` as a "K8s Pool". The Control Plane then fans the pool members out to the Provider mirror (`k8s_instance_pool`) and the Cluster derived pools of every referencing Provider, and they finally reach BFE through the `cluster_table` export. The controller never connects to the Data Plane directly; BFE still sees only the backend lists exported by the Control Plane.
+ai-gateway-controller is a controller (built on controller-runtime) deployed inside a Kubernetes cluster. It watches Services carrying the `ai-gateway-api-name` label together with their same-named Endpoints, and for each named port reports the Ready backend instances in full via the InnerAPI `PUT /inner-api/v1/k8s_pools/{name}/instances` as a "K8s Pool". The Control Plane performs no fan-out: every consumer resolves the effective pool on demand by querying the `k8s_pools` table via `k8s_pool_name`, and the result finally reaches BFE through the `cluster_table` export. The controller never connects to the Data Plane directly; BFE still sees only the backend lists exported by the Control Plane.
 
 ## Relationship with the BFE Open Source Project
 

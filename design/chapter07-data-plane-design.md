@@ -470,6 +470,55 @@ cluster 配置的 `AIConf.ModelProtocols` 字段声明该集群支持的模型�
 
 这样未知协议名的配置错误在启动或热加载阶段即可暴露，而不是在请求转发时才失败。
 
+## 关键能力
+
+BFE 在既有架构之上，沿"表达能力、计费完备性、上游契约适配、企业级 TLS"四条主线提供以下能力，均由控制面 API 下发配置、控制台提供表单。
+
+### 条件表达式引擎（expr）
+
+路由条件与模块规则支持两套并存语法：BFE 自研原语（`req_host_in`、`res_code_in` 等 53 个），以及基于 expr-lang/expr 的条件引擎（`bfe_expr` 包，旧原语经兼容层函数化后在其中可用）：
+
+- `bfe.conf [Server]` 的 `ConditionEngineMode` 开关，三模式：`LegacyFirst`（默认，旧引擎优先、失败回退 expr）、`ExprCompatible`（expr 与旧原语混写，编译失败即报错）、`ExprOnly`（纯 expr，旧原语名视为未知函数）；兼容数字 `0/1/2` 与大小写，非法值启动报错；模式为进程级，**热更新不生效，改模式须重启**；
+- `mod_redirect`、`mod_header` 等共享动作的动作参数支持 `=expr` 前缀（加载期编译 + 类型检查，结果必须为 string），与 `==字面量`（转义）、普通字面量三态并存；运行期求值失败该参数置空并打 warn，不阻断同动作其他参数；
+- 动态数据源：`RedisEnv` 真实可用（`Get`/`GetInt`/`HGetAll`，miss 与错误返回零值不报错），`HttpEnv`/`GlbEnv`/`ConfEnv` 暂为接口占位。
+
+expr 引擎的编译全部发生在配置加载期，运行期只执行求值；表达式出错按 `false` + warn 处理，请求不失败。默认 `LegacyFirst` 与传统原语行为逐字节一致；两套引擎存在有意差异（字符串转义规则、`res_code_in` 字符串比较 vs `ResCode()` 整型比较、哈希空输入的桶稳定性），仅在 `ExprCompatible`/`ExprOnly` 下出现。
+
+### 缺价处置（PriceMissAction）
+
+模型价格未配置时的行为由集群级显式三态配置 `AIConf.PriceMissAction` 决定：`fallback_chat`（缺省，按同模型 chat 价计费）、`bill_zero`（转发但按 0 计费）、`reject`（**转发前拒绝**，503 `PRICE_NOT_CONFIGURED`，不调用上游、不计费但访问日志照常入库）；`ModelTable` 整体缺失视同未定价。信号经访问日志 `ai_price_miss` / `ai_price_warn`（六种形态）全链路上报（详见 [第十五章 可观测性设计](./chapter15-observability.md)）。
+
+### 思考模式推理内容补齐（EnsureReasoningContent）
+
+部分思考模式上游要求回传 `reasoning_content`（缺字段或 `null` 直接 400），而路由切换后的首个请求 assistant 消息来自上一个后端。`AIConf.EnsureReasoningContent`（协议列表，空 = 关闭，仅 `openai`/`anthropic`）在 `doSingleAIForward` 中对校验窗口内的 assistant 消息定点补齐（sjson 写入，字段序与其余字节不变、已有非空值不动）；非 JSON、压缩请求体、批量/文件、`/responses`、超限请求体均原样透传。配套计数 `ReasoningPatched` / `ReasoningSkip` / `ReasoningFail` / `ReasoningStill400`，其中 `ReasoningStill400` 是"上游契约变更"的退出信号。
+
+### Key 惩罚时长可配置
+
+Key 亲和惩罚 TTL 是集群级配置 `AIConf.KeyPolicy.SessionAffinityPenaltyTTL429` / `SessionAffinityPenaltyTTLAuth`（默认 **60 / 300**，`0` 表示用默认值而非关闭，负数报错、`>86400` 截断并 Warn）；缩短配置不追改已存在的 Redis 惩罚键，批量 404 的惩罚固定 60s 不受其影响。详见 [第九章 Entity 与 API-Key 设计](./chapter09-apikey-design.md)。
+
+### 配额欠费模型
+
+配额扣减采用全额 `DECRBY`，余额**允许为负**（欠费如实记录）；鉴权期对负余额判无余额（429）。控制台"已用额度"可大于配额上限，对外 `Remaining` 仍展示 0。详见 [第十二章 配额与限流设计](./chapter12-quota-and-rate-limit.md)。
+
+### 计费与用量采集完备性
+
+- **压缩流式 usage 采集**：上游按 `Accept-Encoding` 压缩 SSE 时不再旁路为逐字节透传——`CompressedStreamDecoder` 原样转发压缩字节、解压副本仅供 usage 解析（设明文预算防解压炸弹）；`bfe.conf [Server]` 的 `AIUpstreamAcceptEncoding`（`auto` 默认 / `identity` / `off`）收窄出站协商到网关可解码集合；
+- **客户端中断与上游断流**：`EstimateToken=true` 时客户端流式中断按已转发内容估算计费（`ai_usage_source=aborted`）；上游中途断流区分归因（`upstream_dropped`）并默认补发协议错误事件（`NormalizeUpstreamError.StreamTruncatedError` 可关）；
+- **非 2xx 行记录用量**：`ai_total_tokens` 口径统一为 `in + out`，非 2xx 行也记 in/out/total（`ai_usage_source=failed`），`ai_cost_value` 仅 2xx 写出。
+
+### EPP 准入拒绝透传
+
+EPP 经 ext_proc 返回 `ImmediateResponse`（429/503）时，映射为 429 `EPP_OVERLOAD` / 503 `EPP_NO_CAPACITY` 并透传 `Retry-After`；**不重试、不回退本地均衡、不喂熔断**，过载场景表现为部分请求收到 429/503，而非全部放行排队。
+
+### TLS 栈（升级前必读）
+
+BFE 的 TLS 基于标准库 `crypto/tls`（经 `GetCertificate` / `GetConfigForClient` / `VerifyConnection` 回调接入证书与校验逻辑），**支持 TLS 1.3**：
+
+- `HttpsBasic.MaxTlsVersion` 默认 `VersionTLS13`、`MinTlsVersion` 默认 `VersionTLS10`——从旧版本升级且未显式配置时，客户端可能协商到 TLS 1.3；
+- `CipherSuites` 由"配置行序即优先级"退化为**纯白名单**（实际顺序由标准库固定表决定），`PreferServerCipherSuites` 成为空操作；
+- 废弃字段解析保留、行为忽略：`EnableSslv2ClientHello`、`[SessionCache]` 全部字段（无 Redis TLS 会话缓存，会话恢复为进程内 session ticket）、`SessionTicketKeyName`、tls_rule_conf 的 `Grade` / `Chacha20` / `DynamicRecord`；
+- **会导致配置加载失败**：标准库 TLS 不提供 `mod_header` 内置变量 `tls_ja3_raw` / `tls_ja3_hash`，引用它们的 `header_rule.data` 将整文件拒载（从旧版本升级前须清理引用）；文本会话日志不含 `ses_tls_client_random` / `ses_tls_server_random`，pb3 `HandshakeTime` 不再写入。
+
 ## 关键配置示例
 
 ### 启用 AI 网关模式
@@ -701,6 +750,7 @@ prepareRequestBodyForRetry()
 - 配置加载采用 INI + JSON 双层结构，支持通过 Web 接口热加载，新配置在校验完成后原子替换旧配置。
 - `mod_ai_route` 支持 `apikey → entity → global` 三级路由、`targets` 加权选择与 `fallbacks` 顺序降级，是 AI 网关转发的核心。
 - 上游路径按协议改写：`AIConf.ProtocolPaths` 中 openai 分支剥离可选 `/v1` 前缀后按 `bfe_basic` 共享端点表判定改写（`/chat/completions` 与 `/v1/chat/completions` 都会拼上 provider 前缀），anthropic 分支只认标准 `/v1` 入口，gemini 永不改写；改写只作用于出站拷贝，fallback 每次 attempt 独立重算。
+- 条件表达式引擎支持 expr（`ConditionEngineMode` 三模式，默认 `LegacyFirst` 与传统原语行为一致），动作参数支持 `=expr`；缺价处置三态（`PriceMissAction`）、推理内容补齐（`EnsureReasoningContent`）、Key 惩罚时长配置与配额欠费模型均为集群级配置；压缩 SSE 的 usage 采集、中断/断流计费归因、非 2xx 用量记录覆盖了计费旁路；TLS 基于标准库实现并支持 TLS 1.3，升级前须清理 JA3 变量引用并评估默认版本变化。
 
 ## 参考文档
 

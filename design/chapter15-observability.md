@@ -142,7 +142,7 @@ AI 可观测字段统一占用 `bfe-access-pb` 的 701-900 编号区间，按用
 | `mirror_hit` | 842 | bool | 该请求是否被镜像（提交成功即记 true） | `mod_traffic_mirror` |
 | `mirror_cluster` | 843 | string | 镜像目标 cluster 名 | `mod_traffic_mirror` |
 
-上述字段中，`ai_cache_status`（789）、`ai_intent_*` 七字段（803-809）与 `mirror_hit` / `mirror_cluster`（842/843）共 10 列由 log-reader `mod_log_mysql` 注册并写入报表库，MySQL 明细表 `bfe_ai_request_log` 共 99 列，列序与 ai-gateway-api `db_ddl_report_mysql.sql` 一致；`ai_cache_key` / `ai_cache_semantic` / `ai_cache_similarity`（790-792）与 `ai_context_*` 四字段（793-796）仅在访问日志层可见，不进入报表库。Kafka 侧 `mod_kafka` 默认字段集与 MySQL 写入列对齐（92 个），其中 `ai_intent_confidence` / `ai_intent_latency_us` / `ai_intent_cache_hit` 为 proto optional 数值，未求值时输出 JSON `null`，语义与 MySQL 侧 NULL 一致。
+上述字段中，`ai_cache_status`（789）、`ai_intent_*` 七字段（803-809）与 `mirror_hit` / `mirror_cluster`（842/843）共 10 列由 log-reader `mod_log_mysql` 注册并写入报表库；另有 `ai_price_miss` / `ai_price_warn` 两列（见下文「缺价信号」），MySQL 明细表 `bfe_ai_request_log` 共 **101 列**，列序与 ai-gateway-api `db_ddl_report_mysql.sql` 一致；`ai_cache_key` / `ai_cache_semantic` / `ai_cache_similarity`（790-792）与 `ai_context_*` 四字段（793-796）仅在访问日志层可见，不进入报表库。Kafka 侧 `mod_kafka` 默认字段集与 MySQL 写入列对齐（94 个），其中 `ai_intent_confidence` / `ai_intent_latency_us` / `ai_intent_cache_hit` 为 proto optional 数值，未求值时输出 JSON `null`，语义与 MySQL 侧 NULL 一致。
 
 ### 计费归因、上游错误归一化与批量任务字段
 
@@ -152,11 +152,12 @@ AI 可观测字段统一占用 `bfe-access-pb` 的 701-900 编号区间，按用
 
 | 字段名 | 编号 | 类型 | 说明 |
 |--------|------|------|------|
-| `ai_price_miss` | 763 | bool | 价格缺失标记：`(model, mode)` 无价格条目、回退到该模型 chat 模式价格（或无回退价格计 0）时为 true |
-| `ai_usage_source` | 764 | string | usage 来源：`parsed`（解析到最终 usage）/ `estimated`（估算 Token 获准计费）/ `aborted`（客户端断连、跳过多计费）/ `unrecognized`（未识别且不可估算、跳过多计费） |
+| `ai_price_miss` | 763 | bool | 价格缺失标记：`(model, mode)` 无价格条目、回退到该模型 chat 模式价格（或无回退价格计 0）时为 true；**请求级**写出（`reject` 的 503 行同样带信号），与 `ai_price_warn` 组成信号对，未缺价为 `null` |
+| `ai_usage_source` | 764 | string | usage 来源：`parsed`（解析到最终 usage）/ `estimated`（估算 Token 获准计费）/ `aborted`（客户端断连；表示“按已转发内容估算计费的原因”而非“未计费”，`EstimateToken=false` 时才零扣费）/ `unrecognized`（未识别且不可估算、跳过多计费）；`upstream_dropped`（上游中途断流、按估算计费）与 `failed`（非 2xx 行记录用量） |
 | `ai_zero_cost_reason` | 765 | string | 2xx 零成本原因：`cache_hit` / `batch_release` / `price_miss` / `price_zero` / `no_usage_tokens` 等 |
+| `ai_price_warn` | **766** | string | 缺价形态：`fallback` / `subitem_missing` / `no_entry` / `no_baseline` / `no_model_table` / `reject`（多因取最具体），未缺价为 `null`；依赖 `bfe-access-pb` ≥ v0.3.17 |
 
-上游错误归一化字段（810-815），记录网关向上游转发过程中的错误归一化结果，使不同厂商的错误在报表与告警中可按统一口径统计：
+上游错误归一化字段（810-816），记录网关向上游转发过程中的错误归一化结果，使不同厂商的错误在报表与告警中可按统一口径统计：
 
 | 字段名 | 编号 | 类型 | 说明 |
 |--------|------|------|------|
@@ -166,6 +167,7 @@ AI 可观测字段统一占用 `bfe-access-pb` 的 701-900 编号区间，按用
 | `ai_err_normalize_miss` | 813 | bool | 错误未命中归一化规则 |
 | `ai_stream_error_rewritten` | 814 | bool | 流式响应中的错误是否已被改写 |
 | `ai_stream_truncated` | 815 | bool | 流式响应是否被截断 |
+| `ai_client_closed_after_complete` | **816** | bool | 完整投递后客户端才挂断（依赖 `bfe-access-pb` ≥ v0.3.18）：此类请求 err_code 置空、不再计入 `CLIENT_WRITE`，与 815 组成 810-816 上游错误块 |
 
 批量任务字段（901-907），由 `mod_ai_batch` 在批量任务与文件操作场景填充：
 
@@ -317,13 +319,13 @@ groups:
 | 项 | `mysql`（轻量形态） | `doris`（标准形态） | `clickhouse`（标准形态） | `starrocks`（标准形态） |
 |----|---------------------|---------------------|--------------------------|-------------------------|
 | 数据链路 | BFE 访问日志 → log-reader `mod_log_mysql` → MySQL | BFE 访问日志 → log-reader `mod_kafka` → Kafka → Doris Routine Load | BFE 访问日志 → log-reader `mod_kafka` → Kafka → Kafka 引擎表 + 消费 MV | BFE 访问日志 → log-reader `mod_kafka` → Kafka → StarRocks Routine Load |
-| 明细表 | MySQL `bfe_ai_request_log`（99 列） | Doris `bfe_ai_request_log`（UNIQUE KEY） | ClickHouse `bfe_ai_request_log`（MergeTree） | StarRocks `bfe_ai_request_log`（DUPLICATE KEY，102 列） |
+| 明细表 | MySQL `bfe_ai_request_log`（101 列，含缺价两列） | Doris `bfe_ai_request_log`（UNIQUE KEY） | ClickHouse `bfe_ai_request_log`（MergeTree） | StarRocks `bfe_ai_request_log`（DUPLICATE KEY，104 列） |
 | 预聚合 | ai-gateway-api 内置分钟聚合 JOB | Doris 侧 INSERT JOB | ClickHouse 侧物化视图（分钟桶） | StarRocks 侧异步物化视图（每分钟刷新） |
 | 报表展示 | 控制台报表页（`/report/*`） | 控制台报表页 + Grafana Dashboard | 控制台报表页 | 控制台报表页 |
 | 外部依赖 | 仅需 MySQL | Kafka + Doris（+ Grafana 可选） | Kafka + ClickHouse | Kafka + StarRocks |
 | 适用场景 | 小规模 / 私有化部署，建议日均日志量 ≤ 百万级 | 大规模部署 | 大规模部署 | 大规模部署 |
 
-四种后端的聚合表统一为 40 个维度 + 24 个指标，下钻维度包含 `ai_cache_status` / `mirror_hit` / `ai_intent_answer`（缓存、镜像、意图），Doris / ClickHouse / StarRocks 三侧口径一致；明细表同名 `bfe_ai_request_log`，列集合对齐 log-reader 输出字段（MySQL 侧 99 列含 10 列缓存/镜像/意图字段，Doris / StarRocks 侧另含 3 列限流打平字段共 102 列，`ARRAY<STRUCT>` 类嵌套列在 MySQL / StarRocks 侧以 JSON 文本列承载，仅用于明细展示，不做过滤条件）。
+四种后端的聚合表统一为 40 个维度 + 24 个指标，下钻维度包含 `ai_cache_status` / `mirror_hit` / `ai_intent_answer`（缓存、镜像、意图），Doris / ClickHouse / StarRocks 三侧口径一致；明细表同名 `bfe_ai_request_log`，列集合对齐 log-reader 输出字段（MySQL 侧 101 列，含 10 列缓存/镜像/意图字段与 2 列缺价信号字段；Doris / StarRocks 侧另含 3 列限流打平字段共 104 列，`ARRAY<STRUCT>` 类嵌套列在 MySQL / StarRocks 侧以 JSON 文本列承载，仅用于明细展示，不做过滤条件）。缺价信号（`ai_price_miss` / `ai_price_warn`）不进聚合维度，对账走明细筛选，`bfe_ai_metrics_1m` 无对应维度。
 
 ### 各后端的连接与专属配置
 

@@ -331,6 +331,22 @@ time_weekday_in("1|2|3|4|5", "H")  // 工作日（北京时间）
 
 控制面方面，升级 bfe 依赖后，保存/校验条件表达式的全部入口——路由规则、AI 缓存规则、AI 上下文规则、流量镜像规则以及 `PATCH /expression/verify`——都接受该原语；非法取值（如 `"7"`、非法 `zone`）仍由编译期校验拒绝并返回 422。
 
+## 条件表达式引擎 expr
+
+BFE 在自研条件原语之上提供基于 expr-lang/expr 的条件表达式引擎（`bfe_expr` 包），旧原语通过兼容层函数化（覆盖 53 个既有原语），`condition.Build` 按 `bfe.conf [Server]` 的 `ConditionEngineMode` 分派：
+
+| 模式 | 语义 |
+|------|------|
+| `LegacyFirst`（默认） | 旧引擎优先，旧原语编译失败时回退 expr；与传统原语行为逐字节一致 |
+| `ExprCompatible` | expr 与旧原语混写，编译失败即报错 |
+| `ExprOnly` | 纯 expr，旧原语名视为未知函数 |
+
+模式兼容数字 `0/1/2` 与大小写，**非法值启动报错**；模式为进程级，热更新不生效、改模式须重启。路由规则的 `cond` 字段及上述全部校验入口在 expr 模式下走同一编译管线。
+
+expr 模式下可以表达旧原语难以组合的逻辑（算术、布尔组合、变量函数），并可通过动态数据源读取 Redis（`RedisEnv` 的 `Get` / `GetInt` / `HGetAll`，miss 与错误返回零值不报错；默认 conn 100ms / read 300ms / write 300ms）。需要留意新旧引擎的有意差异：字符串转义统一按 Go 规则（正则 `\.` 在 expr 中须写 `\\.` / 反引号 / `[.]`）；`res_code_in` 旧原语按字符串比较而新式 `ResCode()` 按整型比较；哈希空输入的随机桶语义不同。表达式出错按 `false` + warn 处理，请求不失败。
+
+动作参数侧，`mod_redirect` / `mod_header` 等共享动作的动作参数支持 `=expr` 前缀（详见 [第七章 数据面转发设计：BFE](./chapter07-data-plane-design.md)）。控制面保存路径不变——`validate.ConditionExpression` 仍调用 `condition.Build`，同一套校验同时约束两种引擎。
+
 ## 导出到 BFE 的绑定顺序与文件格式
 
 ### 导出结构

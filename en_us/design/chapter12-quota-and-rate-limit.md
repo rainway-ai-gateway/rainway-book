@@ -131,6 +131,15 @@ The system uses two different Redis write strategies for different scenarios.
 
 **Atomic SET (periodic reset)**: periodic reset uses `ResetToQuotaAtomic`, which executes `redis.call('set', KEYS[1], ARGV[1])` via a Lua script to set the balance directly to the total quota. `IncrBy(delta)` must first read the current value and then compute the difference before writing; there is a time window between the read and the write: if a request completes a deduction in between, the delta computed from the stale value makes the final result deviate from the total quota. Atomic SET does not depend on the current value — the final result is always exactly the total quota and depends only on the ordering between the SET and concurrent deductions — eliminating the read-modify-write race. Combined with the distributed lock (see below), which converges global resets onto a single instance, the contention window between the SET and request-path deductions is also minimal.
 
+### Overage Model: Negative Balances Allowed
+
+Each deduction is a full `DECRBY` with no `math.min(current, amount)` truncation, so the balance may go negative and overages are recorded faithfully:
+
+- The Data Plane performs no deduction truncation, so the balance can fall below 0; `HasBalance` still treats a negative balance as "no balance" at request time (429 QuotaExhausted, unchanged behavior), with a `QuotaOverage` counter + WARN for overage alerting;
+- Control Plane presentation: `used = quota − remaining` reflects overage faithfully (**it may exceed `quota`**), while `Balance.Remaining` is still displayed as 0 when the Redis balance is negative; the adjustment paths (`adjustQuota` and two others) do not clamp at zero, so "adjusting quota while in overage" preserves the overage (negative `remaining` is kept and authentication keeps rejecting);
+- Dashboard caps the usage percentage at 100% and makes the overage state recognizable;
+- No data migration: the Redis single-key model is unchanged; note that **existing keys pinned at 0 before the upgrade cannot recover their historical overage**.
+
 ---
 
 ## Calendar Week/Month Reset and Expired Reset
@@ -410,7 +419,7 @@ After receiving the configuration, BFE:
 
 A 429 from rate limiting means "the caller is over limit", whereas `NO_AVAILABLE_KEY` means "the gateway has no usable upstream credential". Both are 429 but with different attribution:
 
-- When every candidate Key in the cluster is in its penalty window (429 penalties last 60s, 401/402/403 penalties last 3600s, and penalties are written only when session-affinity penalty is enabled), Key selection returns an empty candidate set and the forwarding loop synthesizes 429 `NO_AVAILABLE_KEY` (type `rate_limit_error`, message `no available upstream api key for this cluster`), carrying `Retry-After` and `error.details.retry_after_seconds`, both fixed at 60s;
+- When every candidate Key in the cluster is in its penalty window (the 429-tier and 401/402/403-tier penalty durations are configurable per cluster via `key_affinity.penalty_ttl_429` / `penalty_ttl_auth`, defaulting to 60s / **300s**; penalties are written only when session-affinity penalty is enabled), Key selection returns an empty candidate set and the forwarding loop synthesizes 429 `NO_AVAILABLE_KEY` (type `rate_limit_error`, message `no available upstream api key for this cluster`), carrying `Retry-After` and `error.details.retry_after_seconds`, both fixed at 60s;
 - The Key penalty filter skips `Weight=0` Keys: they never participate in selection and are not counted as candidates;
 - An empty candidate set acts as a circuit breaker for that cluster: the current attempt stops rotating Keys and falls back per the fallback rules; Keys become available again automatically when the TTL expires, with no manual intervention.
 

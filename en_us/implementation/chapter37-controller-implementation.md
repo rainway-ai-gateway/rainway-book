@@ -127,28 +127,19 @@ The result of each handling is written to two places: the annotation on the Serv
 
 ## Links to the Control Plane and the Data Plane
 
-The controller is responsible only for writing instances into `k8s_pools`. The rest of the path from the pool to the Data Plane is completed inside AI Gateway API and fanned out within a single database transaction:
-
-1. Write or delete the `k8s_pools` row;
-2. Find every Provider whose `instance_source=k8s_pool` and `k8s_pool_name` equals this pool name;
-3. Refresh each Provider's read-only mirror `k8s_instance_pool` (`PUT` with the new list, `DELETE` with an empty list);
-4. Trigger the Cluster derived pool sync of each referencing Provider; the `cluster_table` version is updated automatically by the export signature.
-
-If any step fails, the whole transaction rolls back, so the Provider mirror, the Cluster derived pools, and the pool members always stay consistent. Which pool a Provider references is declared by operators through the OpenAPI `instance_source` and `k8s_pool_name`; the controller never modifies Provider or Cluster configuration.
+The controller is responsible only for writing instances into `k8s_pools`; the rest of the path from the pool to the Data Plane is completed inside AI Gateway API with no fan-out: `PUT` / `DELETE` only maintain the `k8s_pools` table itself and never write the Provider mirror (Provider responses and the schema have no `k8s_instance_pool` field) or the Cluster derived pools; instances are resolved on demand by `InstancePoolResolver` via `k8s_pool_name` at consumption time (see "Effective Instance Pool Contract" in [Chapter 10: Provider and Cluster Design](../design/chapter10-provider-and-cluster.md)). Deleting a referenced pool keeps the pool record and clears its instances (the detail query returns `instance_count=0`). Which pool a Provider references is declared by operators through the OpenAPI `instance_source` and `k8s_pool_name`; the controller never modifies Provider or Cluster configuration.
 
 ```mermaid
 flowchart LR
     S["Service / Endpoints<br/>Ready addresses"] -->|watch| C[ai-gateway-controller]
     C -->|"PUT /inner-api/v1/k8s_pools/{name}/instances"| A["AI Gateway API<br/>k8s_pools table"]
-    A -->|"Fan-out: refresh read-only mirror"| P["Provider<br/>k8s_instance_pool"]
-    A -->|"Fan-out: trigger derived pool sync"| CL["Cluster derived pool"]
-    P -->|Effective instance pool| CL
-    CL --> CT["cluster_table export"]
+    A -->|"On-demand resolution"| R["InstancePoolResolver"]
+    R --> CT["cluster_table export"]
     CT -->|InnerAPI| CA[Conf Agent]
     CA -->|Hot reload| B[BFE]
 ```
 
-From a Provider's perspective, "pool absent" and "pool present with zero instances" are the same state: the effective instance pool is empty. In that state the Cluster derived pool is synced to empty, `cluster_table` exports an empty entry, BFE loads the configuration normally, and requests to that Cluster return 500 (`BK_NO_BACKEND`), covered by alerting. This semantics leaves downstream consumers with only one empty state to handle.
+From a Provider's perspective, "pool absent" and "pool present with zero instances" are the same state: the effective instance pool is empty. In that state the K8s-mode Cluster's derived pool is an empty placeholder, `cluster_table` exports an empty entry, BFE loads the configuration normally, and requests to that Cluster return 500 (`BK_NO_BACKEND`), covered by alerting. This semantics leaves downstream consumers with only one empty state to handle.
 
 ---
 
@@ -183,7 +174,7 @@ For day-to-day troubleshooting, check in the following order:
 - ai-gateway-controller is the sole writer of K8s pool members: it watches Services carrying the `ai-gateway-api-name` label and their same-named Endpoints, and reports Ready instances per named port in full via the InnerAPI; it never touches the database or BFE directly.
 - Filtering combines three conditions — namespace, label, and port name; instances come from Ready addresses and are deduplicated, and pool names follow `k8s_<namespace>_<service>_<port>[_<cluster>]`, folded into a prefix plus hash when too long.
 - `PUT` is an idempotent full replacement, `DELETE` treats 404 as success, and no Ready address yields an empty array; the annotation records pool names for difference-based cleanup, the finalizer ensures pools are deleted before a Service disappears, and results are written to both an Event and the `<service>.result` ConfigMap.
-- The fan-out from the pool to the Data Plane is done by AI Gateway API within a single transaction: it refreshes the Provider `k8s_instance_pool` mirror and syncs the Cluster derived pools, which finally reach BFE through the `cluster_table` export. Single-replica deployment and upgrading the API before the controller are prerequisites for stable operation.
+- The flow from pool to Data Plane changed in API v0.1.0 from "fan out to the Provider mirror + Cluster derived pools within a transaction" to on-demand resolution (`InstancePoolResolver`), so the `cluster_table` export reflects pool contents at query time; deleting a referenced pool keeps the row and clears its instances. Single-replica deployment and upgrading the API before the controller remain prerequisites for stable operation.
 
 ---
 

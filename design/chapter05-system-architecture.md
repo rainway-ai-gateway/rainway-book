@@ -115,11 +115,11 @@ OpenAI、DeepSeek、Anthropic、Google Gemini 等模型服务商的 API 协议�
 
 - **过滤**：只处理带有 `ai-gateway-api-name` 标签的 Service（标签值等于启动参数 `--ai-gateway-api-name`，`*` 表示任意），并受 `--namespace` 的命名空间列表约束。
 - **端口与实例**：按 Service 的每个具名端口建立一条池，无名端口跳过；实例取自同名 Endpoints 的 Ready 地址，忽略 `notReadyAddresses`，`(addr, port)` 去重后经 `PUT` 全量替换上报，重复上报幂等。
-- **池命名**：`k8s_<namespace>_<service>_<port>[_<cluster>]`；超过 64 字符时折叠为前 55 字符加 `_` 与 sha256 前 8 位，池名须为 1-64 个字符且仅含字母、数字与 `_`、`-`、`.`。
-- **空池与清理**：无 Ready 地址时上报空数组 `[]`，池保留但零实例；端口改名或移除时按差集删除旧池；Service 删除由 finalizer `k8s.bfenetworks.com/delete-protection` 拦截，先删池再放行。
+- **池命名**：`k8s_<namespace>_<service>_<port>[_<cluster>]`；控制器侧超过 64 字符时折叠为前 55 字符加 `_` 与 sha256 前 8 位；控制面对池名的合法上限为 **128** 个字符，字符集为字母、数字与 `_`、`-`、`.`。
+- **空池与清理**：无 Ready 地址时上报空数组 `[]`，池保留但零实例；端口改名或移除时按差集删除旧池；Service 删除由 finalizer `k8s.bfenetworks.com/delete-protection` 拦截，先删池再放行；删除仍被 Provider 引用的池时“保留池记录 + 清空实例”（`instance_count=0`），不级联失败。
 - **鉴权**：以 `--ai-gateway-api-token` 携带 `Token <identify>` 调用 InnerAPI，Token 需属于 System Scope 并具备 `k8s_pools` 域写权限，否则返回 402。
 
-上报进入控制面后，AI Gateway API 在单个事务内把池成员扇出到引用它的 Provider 只读镜像 `k8s_instance_pool` 与 Cluster 派生池，最终经 `cluster_table` 导出到 BFE；Provider 视角下「池不存在」与「池存在但零实例」等价。详细设计参见 [第十章 Provider 与 Cluster 设计](./chapter10-provider-and-cluster.md)。
+上报进入控制面后，池成员不做扇出：Provider 不存储实例镜像（无 `k8s_instance_pool` 字段，请求体携带按未知字段静默忽略），由各消费方按 `k8s_pool_name` 实时查询 `k8s_pools` 表解析有效池（`InstancePoolResolver`，池名空/池不存在返回空列表，读取失败 fail-close），K8s 模式 Cluster 的派生池为空占位、不承载实例，最终经 `cluster_table` 导出到 BFE；Provider 视角下「池不存在」与「池存在但零实例」等价。控制面提供只读 OpenAPI `GET /open-api/v1/k8s_pools[/{name}]` 供控制台展示池列表、实例与最近同步时间。详细设计参见 [第十章 Provider 与 Cluster 设计](./chapter10-provider-and-cluster.md)。
 
 ### AI 业务集群（Cluster）
 
@@ -207,11 +207,11 @@ Conf Agent 的存在使得控制面无需直接连接数据面，配置下发是
 
 ### ai-gateway-controller（服务发现）
 
-ai-gateway-controller 是部署在 Kubernetes 集群内的控制器（基于 controller-runtime），负责把服务发现结果写入控制面：监听带 `ai-gateway-api-name` 标签的 Service 及其同名 Endpoints，按每个具名端口把 Ready 实例经 InnerAPI `PUT /inner-api/v1/k8s_pools/{name}/instances` 全量上报为 K8s 实例池。池成员的后续流转由控制面完成——扇出到 Provider 的 `k8s_instance_pool` 镜像与 Cluster 派生池，再随 `cluster_table` 导出给 BFE。控制器不直接连接 BFE，也不修改 Provider 或 Cluster 配置；引用池的 Provider 由运维通过 OpenAPI 声明。实现与部署细节见 [第三十七章 ai-gateway-controller实现](../implementation/chapter37-controller-implementation.md)。
+ai-gateway-controller 是部署在 Kubernetes 集群内的控制器（基于 controller-runtime），负责把服务发现结果写入控制面：监听带 `ai-gateway-api-name` 标签的 Service 及其同名 Endpoints，按每个具名端口把 Ready 实例经 InnerAPI `PUT /inner-api/v1/k8s_pools/{name}/instances` 全量上报为 K8s 实例池。池成员不扇出到 Provider 只读镜像（无 `k8s_instance_pool` 字段），由控制面在导出与查询时按 `k8s_pool_name` 实时解析，再随 `cluster_table` 导出给 BFE（K8s 模式 Cluster 派生池为空占位）。控制器不直接连接 BFE，也不修改 Provider 或 Cluster 配置；引用池的 Provider 由运维通过 OpenAPI 声明。实现与部署细节见 [第三十七章 ai-gateway-controller实现](../implementation/chapter37-controller-implementation.md)。
 
 ### Log Reader（数据面日志采集）
 
-Log Reader 是数据面日志采集组件（仓库 `rainway-ai-gateway/log-reader`），部署在 BFE 侧，负责读取 BFE 产生的访问日志（`bfe-access-pb` 协议），将注册过的字段解析为结构化的 Token 用量、延迟、状态码等记录，并按字段注册结果写入 MySQL（`mod_log_mysql` 插件，99 列）或 Kafka（`mod_kafka` 插件，JSON 形态），供报表统计与可观测分析消费。详细设计见 [第十五章 可观测性设计](./chapter15-observability.md)。
+Log Reader 是数据面日志采集组件（仓库 `rainway-ai-gateway/log-reader`），部署在 BFE 侧，负责读取 BFE 产生的访问日志（`bfe-access-pb` 协议），将注册过的字段解析为结构化的 Token 用量、延迟、状态码等记录，并按字段注册结果写入 MySQL（`mod_log_mysql` 插件，101 列，含 `ai_price_miss` / `ai_price_warn` 两列）或 Kafka（`mod_kafka` 插件，JSON 形态），供报表统计与可观测分析消费。详细设计见 [第十五章 可观测性设计](./chapter15-observability.md)。
 
 ---
 

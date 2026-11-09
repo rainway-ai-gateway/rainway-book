@@ -443,8 +443,22 @@ image_generation 与 video_generation 的计费由匹配到的价格条目（ent
 
 价格表没有某个 `(model, mode)` 条目时（例如 `/responses` 入口的模型只配置了 `mode=chat` 价格），BFE 回落到同一模型的 chat 价计费，而不是按 0 计费。该行为伴随可观测标记：
 
-- 模块计数器 `PriceFallbackUsed` 统计回落计费的次数，`PriceLookupMiss` 统计连回落基线都不存在的无价格次数（`bfe/bfe_modules/mod_ai_token_auth/mod_ai_token_auth.go`）；
+- 模块计数器 `PriceFallbackUsed` 统计回落计费的次数，`PriceMissZeroBilled` 统计连回落基线都不存在的无价格次数（`bfe/bfe_modules/mod_ai_token_auth/mod_ai_token_auth.go`）；
 - 访问日志以 `ai_price_miss` 字段（pb field 763，`bfe-access-pb` ≥ v0.3.14）标记价格缺失：两种 miss（回落计费、无基线）都会置 true，用于区分"未定价的低价/0 计费行"与合法的 0 成本行。字段细节见[第三十二章 Token认证与配额模块实现：mod_ai_token_auth](../implementation/chapter32-mod-ai-token-auth.md)。
+
+#### 缺价处置三态
+
+缺价行为由集群级显式配置 `llm_config.price_miss_action` 决定（snake_case 入库，导出为 `AIConf.PriceMissAction` 的 PascalCase），三态：
+
+| 取值 | 语义 |
+|------|------|
+| `fallback_chat`（缺省） | 按同模型 chat 价计费（即上节的回落行为） |
+| `bill_zero` | 正常转发但按 0 计费 |
+| `reject` | **转发前拒绝**：返回 503 `PRICE_NOT_CONFIGURED`，不调用上游、不计费，访问日志照常入库 |
+
+`ModelTable` 整体缺失视同未定价（同样按 `reject` 拒）；cluster 查询失败的 fail-open 行为不变。非法值在控制面导出侧 422、数据面加载侧 `AIConfCheck` 同样报错；存量集群未设置该字段时零迁移（bfe 归一为 `fallback_chat`）。
+
+可观测侧以**信号对**上报：`ai_price_miss`（bool，field 763）与 `ai_price_warn`（string，field **766**，`bfe-access-pb` ≥ v0.3.17，取六种形态——`fallback` / `subitem_missing` / `no_entry` / `no_baseline` / `no_model_table` / `reject`，多因取最具体）；两字段统一 **NULL = 未上报** 语义，`ai_price_miss` 为**请求级**写出（`reject` 的 503 行同样带信号）。报表库明细表共 **101** 列（缺价两列位于 `ai_intent_questions_version` 之后），查询参数支持 `price_warn` 精确过滤（白名单校验，非法值 422）。配套计数器为 `PriceMissZeroBilled`（缺价按 0 计）/ `PriceRejected` / `PriceFallbackSubItemMiss`。已知并接受残余：子项缺失（如缺 cache 读写价键）按 0 计但不拒单。
 
 ### 向后兼容
 
@@ -599,7 +613,7 @@ models:
 - BFE 数据面加载后价格保持 `float64`（负值加载报错），运行时根据 Token 用量和活跃 tier 逐项 `quota.CalcCostUnits` 换算为 1e-8 元定点整数再累加，Redis 扣减与存量配置的金额语义保持不变。
 - chat 计费以总输入 Token 为起点拆分缓存读写、图片输入、音频输入等维度；所有细化价格键均未配置时回退 legacy 公式。
 - image_generation / video_generation 按"价格键是否存在"（`ModelPrice.HasPrice`）判别：缺 per-unit 价键回落 chat token 公式，显式 0 价仍按 per-unit 计费（成本为 0）。
-- 价格表无 `(model, mode)` 条目时回落同模型的 chat 价计费，并通过计数器 `PriceFallbackUsed` / `PriceLookupMiss` 与访问日志字段 `ai_price_miss` 暴露可观测性。
+- 价格表无 `(model, mode)` 条目时回落同模型的 chat 价计费，并通过计数器 `PriceFallbackUsed` / `PriceMissZeroBilled` 与访问日志字段 `ai_price_miss` 暴露可观测性。
 - 批量任务通过 `mode=batch` 价格行与 `batch_discount` 折扣系数定价：导出时展开为显式 batch 价格行，手工维护的 batch 行优先于系数展开；batch 结算按 `usage_in × input + usage_out × output` 基价，tier 价一期未接入。
 - Anthropic 用量在协议适配层归一化为总输入语义（`input_tokens + cache_read + cache_creation`），与 OpenAI 的 `prompt_tokens` 对齐；Responses API 的 `input_tokens` 是包含 `cached_tokens` 的子集语义，直接取作 `PromptTokens`（不做 additive 累加）；支持 `responses`（复用 chat 计费）与 `video_generation`（按 `output_cost_per_video` × 视频数）两种计费模式。
 - Provider 与 Cluster 概念分离后，`model-prices.provider` 仅作为价格归集标识，与 `/providers` 为弱引用关系，配置更灵活；`AIConf.ModelTable` 由控制面在导出时按 provider 拼接生成。

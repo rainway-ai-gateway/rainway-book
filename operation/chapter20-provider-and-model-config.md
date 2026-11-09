@@ -43,6 +43,8 @@ Dashboard 是面向运维人员的可视化控制台。登录后进入 **资源�
 
 **实例池**：支持 **IP 模式** 与 **服务商域名模式** 二选一。
 
+> **第三种来源：K8s 实例池**。实例来源切换为 K8s 池时，池名为**下拉选择**（数据源为只读接口 `GET /open-api/v1/k8s_pools`），编辑与详情页按 `GET /open-api/v1/k8s_pools/{name}` **实时查询**展示实例表（地址/端口/权重）与池状态——池不存在（404）、池为空分别给出提示；`disable` 为只读字段不渲染开关；池名合法长度 128 字符。Provider 不保存实例镜像（无 `k8s_instance_pool` 字段），实例列表始终来自池的实时查询结果。详见 [第十章 Provider 与 Cluster 设计](../design/chapter10-provider-and-cluster.md)「K8s 实例池供给」。
+
 IP 模式（默认）适用于自建机房 / 私有化部署（vLLM / Xinference / Ollama 等），可「+ 创建」多行实例：
 
 | 字段 | 必填 | 默认值 | 校验规则 |

@@ -216,7 +216,7 @@ Call timeout (`timeout`):
 
 The duration fields use a "number box + unit dropdown (ms / s / m)" composite control: the health check interval, cooldown, and call timeout default to `s`, while the connect timeout defaults to `ms`; switching the unit converts the number and keeps the physical duration unchanged. Entering `0` is blocked at submission and never silently replaced by the default; clearing the number box means unset, and the default is filled in on submission.
 
-> **Card order**: the LLM configuration step lays out its cards top to bottom as Model Service → Model Redirection → Service Authentication Keys → Key Routing Policy → Key Affinity → Upstream Error Normalization → Balance Mode Configuration (which embeds flow control and the EPP runtime parameters in EPP mode).
+> **Card order**: the LLM configuration step lays out its cards top to bottom as Model Service → Model Redirection → Service Authentication Keys → Key Routing Policy → Key Affinity → Upstream Error Normalization → Balance Mode Configuration (which embeds flow control and the EPP runtime parameters in EPP mode); the step also contains the "Price-Miss Handling" and "Reasoning-Content Completion Protocols" cards (see the corresponding sections).
 
 > **WRR ↔ EPP switching**: `epp_config` and `epp_runtime` take effect only in `EPP` mode; when switching back to `WRR`, the configuration is **retained but inactive** (dormant) and takes effect again when switching back to `EPP` — no configuration is lost when switching back and forth. On submit, whether these two fields are carried is decided by "currently EPP, or a configuration already existed": a brand-new pure-WRR cluster carries neither field, while a WRR cluster that already had them keeps carrying them (dormant retention).
 
@@ -405,9 +405,11 @@ Constraints: each `name` must correspond to a name that already exists in the Pr
 | `enabled` | Whether Key affinity is enabled | `true` |
 | `ttl` | Binding idle timeout (seconds); after a hit, BFE refreshes the TTL, so the binding stays alive with continuous requests | `600` |
 | `redis_prefix` | Redis Key prefix | `"bfe:ai:key_affinity"` |
-| `penalty_enable` | Key penalty: when on, Keys that recently returned `429/401/403` are temporarily demoted and skipped | `true` |
+| `penalty_enable` | Key penalty: when on, Keys that recently returned `429/401/402/403` are temporarily demoted and skipped | `true` |
+| `penalty_ttl_429` | 429-tier penalty duration (seconds), legal range [10, 600] | `60` |
+| `penalty_ttl_auth` | 401/402/403-tier penalty duration (seconds), legal range [60, 1800] | `300` |
 
-> Key affinity depends on the Data Plane Redis configuration; when Redis is unavailable, it automatically degrades to weighted random.
+> Key affinity depends on the Data Plane Redis configuration; when Redis is unavailable, it automatically degrades to weighted random. `0`/negative/out-of-range values return 422 and are not persisted; `key_affinity` follows **replace-whole** semantics — the console form follows "read full → change one field → submit whole", and submitting a fragment backfills defaults and resets the other sub-fields. Shortening the penalty configuration does not retroactively update existing Redis penalty keys (they expire naturally).
 
 ### Upstream Error Normalization (`llm_config.normalize_upstream_error`)
 
@@ -422,6 +424,22 @@ Constraints: each `name` must correspond to a name that already exists in the Pr
 | `max_body_bytes` | Error Response Body Read Limit (bytes) | Upper bound on reading the error body, from 0 to 4194304; bodies exceeding it are treated as unrecognized, and `0` or an omitted value uses the BFE default 65536; **shown only when "Enabled" is on** | `65536` |
 
 For the semantics and the access-log fields, see [Chapter 10 Provider and Cluster Design](../design/chapter10-provider-and-cluster.md). The same group of fields is also available through `llm_config.normalize_upstream_error` in the OpenAPI `POST/PUT /clusters`.
+
+### Price-Miss Handling (`llm_config.price_miss_action`)
+
+How to handle a missing model price. The console provides a three-state dropdown in the LLM configuration step (new clusters explicitly submit the default value, edits are read back, and the review/detail pages display it):
+
+| Value | UI Semantics |
+|------|--------------|
+| `fallback_chat` (default) | Bill at the same model's chat price |
+| `bill_zero` | Forward normally, bill 0 |
+| `reject` | Reject before forwarding: 503 `PRICE_NOT_CONFIGURED`, no upstream call and no billing (the access-log row is still written with the price-miss signal) |
+
+The report detail view carries a "Price Miss" column (red text showing the miss form) plus detail fields. See "Price-Miss Actions" in [Chapter 13 Model Pricing and Cost Accounting Design](../design/chapter13-model-pricing.md).
+
+### Reasoning-Content Completion Protocols (`llm_config.ensure_reasoning_content`)
+
+A per-protocol multi-select (`openai` / `anthropic`) for the scenario where a reasoning-mode upstream requires `reasoning_content` to be echoed back and rejects with 400 otherwise; **an empty selection = disabled** (the default). The frontend validates that the selected protocols are within the owning Provider's `model_protocols` and explicitly rejects `gemini` (whose request body has no injection point; the Control Plane likewise returns 422). Once enabled, BFE patches empty `reasoning_content` values into assistant messages within the validation window, leaving all other bytes unchanged. See "Reasoning-Content Completion" in [Chapter 7 Data Plane Forwarding Design: BFE](../design/chapter07-data-plane-design.md).
 
 ### Balance Mode (`balance_mode` and `epp_config`)
 

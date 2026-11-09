@@ -281,7 +281,7 @@ BFE（数据面）──访问日志──▶ log-reader (mod_kafka) ──JSON�
 | Kafka | 2.8+ | Broker 可访问，`bfe_ai_log` Topic 已创建（按实际规模调整分区数与保留策略） |
 | Grafana | — | 已安装，且已知其安装根目录（含 `bin/` 与 `conf/provisioning/`） |
 | mysql 客户端 | 任意 | 用于连接 Doris FE 执行部署 SQL |
-| log-reader | v1.5.0 | 随 BFE 部署，启用 `mod_kafka` 插件 |
+| log-reader | v1.6.0 | 随 BFE 部署，启用 `mod_kafka` 插件 |
 
 ### 步骤 1：部署 Doris 侧对象
 
@@ -385,7 +385,7 @@ BFE（数据面）──访问日志──▶ log-reader (mod_kafka) ──JSON�
 | ClickHouse | 26.10+ | 集群已启动，支持 JSON 类型（开发基线 26.10）；native TCP 端口可访问（默认 9000） |
 | Kafka | 2.8+ | Broker 可访问，`bfe_ai_log` Topic 已创建（按实际规模调整分区数与保留策略） |
 | clickhouse-client | 与集群版本匹配 | 本机执行部署 SQL |
-| log-reader | v1.5.0 | 随 BFE 部署，启用 `mod_kafka` 插件 |
+| log-reader | v1.6.0 | 随 BFE 部署，启用 `mod_kafka` 插件 |
 
 ### 步骤 1：部署 ClickHouse 侧对象
 
@@ -459,7 +459,7 @@ BFE（数据面）──访问日志──▶ log-reader (mod_kafka) ──JSON�
 | StarRocks | 3.5+ | FE 已启动且 MySQL 协议端口（默认 9030）可访问 |
 | Kafka | 2.8+ | Broker 可访问，`bfe_ai_log` Topic 已创建（按实际规模调整分区数与保留策略） |
 | mysql 客户端 | 任意 | 用于连接 SR FE 执行部署 SQL，**必须带 `--skip-comments`**（SR FE 解析器拒绝"仅含注释"的语句，mysql 客户端默认把注释行作为独立语句发送会报 1064 语法错误） |
-| log-reader | v1.5.0 | 随 BFE 部署，启用 `mod_kafka` 插件 |
+| log-reader | v1.6.0 | 随 BFE 部署，启用 `mod_kafka` 插件 |
 
 ### 步骤 1：部署 StarRocks 侧对象
 

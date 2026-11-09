@@ -2,9 +2,9 @@
 
 This book involves two categories of error codes: the OpenAI-compatible error codes returned by the BFE Data Plane in AI gateway scenarios, and the `ErrNum` business error codes returned by the AI Gateway API Control Plane OpenAPI. Both are maintained by the official BFE documentation and the Control Plane interface definition documents respectively; this book does not repeat them, but highlights the key semantics of both categories in AI gateway scenarios.
 
-## BFE Data Plane Error Codes (v1.8.9)
+## BFE Data Plane Error Codes (v1.9.0)
 
-- [BFE AI Gateway Error Codes](https://github.com/bfenetworks/bfe/blob/refs/heads/v1.8.9-dev/docs/zh_cn/sys_design/ai_error_codes.md)
+- [BFE AI Gateway Error Codes](https://github.com/bfenetworks/bfe/blob/refs/heads/v1.9.0-dev/docs/zh_cn/sys_design/ai_error_codes.md)
 
 That document covers the following:
 
@@ -25,10 +25,13 @@ The table below lists the error codes the gateway injects in AI gateway scenario
 
 | HTTP | code | type | Trigger and key points |
 |------|------|------|-----------------------|
-| 429 | `NO_AVAILABLE_KEY` | `rate_limit_error` | No upstream API Key is available for the cluster: every Key with `weight > 0` is in its penalty window (`Weight=0` Keys never become candidates), leaving an empty candidate set after penalty filtering (message `no available upstream api key for this cluster`). The response carries `Retry-After` and `error.details.retry_after_seconds`, equal to the 429 penalty TTL of 60s; an empty candidate set trips the circuit breaker and synthesizes this 429, recovering when the TTL expires |
+| 429 | `NO_AVAILABLE_KEY` | `rate_limit_error` | No upstream API Key is available for the cluster: every Key with `weight > 0` is in its penalty window (`Weight=0` Keys never become candidates), leaving an empty candidate set after penalty filtering (message `no available upstream api key for this cluster`). The response carries `Retry-After` and `error.details.retry_after_seconds`, equal to the 429 penalty TTL of 60s; an empty candidate set trips the circuit breaker and synthesizes this 429, recovering when the TTL expires. Both penalty durations are configurable (`penalty_ttl_429` / `penalty_ttl_auth`, defaulting to 60s / 300s; see [Chapter 10 Provider and Cluster Design](../design/chapter10-provider-and-cluster.md)) |
 | 500 | `CONTENT_REJECTED` | `invalid_request_error` | Request-phase content audit rejects the request (message `request rejected by content audit`). The gateway does not retry, does not penalize the session, and does not classify it as a 502 |
 | 500 | `BK_NO_BACKEND` | `internal_error` | The target sub-cluster's effective instance pool is empty (message `no available backend for this request`); a sub-cluster missing from `cluster_table` is likewise treated as having no backend. This error reflects a configuration or instance-export problem and should raise an alert |
 | 502 | `BACKEND_UNAVAILABLE` | `internal_error` | The target cluster does not exist or the backend connection fails (message `upstream backend unavailable for this request`). The distinction from `BK_NO_BACKEND`: the latter means the cluster exists but has no usable instance, whereas this one means the cluster cannot be resolved or reached |
+| 503 | `PRICE_NOT_CONFIGURED` | `internal_error` | Returned when the cluster sets `price_miss_action=reject` and the model/mode has no price entry (or the `ModelTable` is missing entirely) — **rejected before forwarding**: no upstream call and no billing, while the access-log row is still written with the price-miss signal (see "Price-Miss Actions" in [Chapter 13 Model Pricing and Cost Accounting Design](../design/chapter13-model-pricing.md)) |
+| 429 | `EPP_OVERLOAD` | `rate_limit_error` | EPP explicitly rejects via an ext_proc `ImmediateResponse` (backpressure overload); `Retry-After` is passed through. **No retry, no local-balancing fallback, no circuit-breaker feed** |
+| 503 | `EPP_NO_CAPACITY` | `internal_error` | EPP admission rejection (no endpoint capacity), with the same overload-protection semantics |
 
 ## AI Gateway API Control Plane Error Codes
 
@@ -41,6 +44,7 @@ The Control Plane OpenAPI uniformly returns a `{ErrNum, Data, ErrMsg}` structure
 | 402 | Insufficient call permission |
 | 403 | Access forbidden (management-plane IP allowlist rejection); the response body is `{"ErrNum":403,"Type":"Access Forbidden"}` |
 | 404 | The object being queried/updated/deleted does not exist |
+| 405 | Method not allowed, with an `Allow` header (methods supported by the path, separated by comma+space) in the response; 404/200 responses do not carry this header |
 | 409 | Resource dependency conflict |
 | 422 | Invalid parameters (including form/URI parameter type-conversion errors such as `stream=not-bool` or `page=abc`, which return `Param Illegal: invalid <field>: <value>`) |
 | 500 | Other business logic errors (fallback code for unknown errors) |
@@ -54,7 +58,9 @@ Among them, 409 Conflict is dedicated to resource dependency conflict scenarios,
 - Deleting a certificate referenced by a Product (`model/iprotocol/certificate.go`);
 - Deleting a product cluster referenced by route rules, or updating its models while it is referenced by route rules (`model/iroute_conf/route_rule.go`, `model/route_rules/route_rules.go`, which check rule target/fallback references);
 - Deleting an Entity that still has child entities (`model/entity/entity_manager.go`);
-- Canceling a batch task that has already completed or entered a terminal state (`POST /open-api/v1/batches/{batch_id}/cancel` while the task is in `completed`/`expired`/`failed`/`cancelled`, returning `BATCH_TERMINAL_OR_CONFLICT`; a task in `cancelling` returns 200 as an idempotent replay and is not a 409).
+- Canceling a batch task that has already completed or entered a terminal state (`POST /open-api/v1/batches/{batch_id}/cancel` while the task is in `completed`/`expired`/`failed`/`cancelled`, returning `BATCH_TERMINAL_OR_CONFLICT`; a task in `cancelling` returns 200 as an idempotent replay and is not a 409);
+- A concurrent whole-set `PUT` on the collection resources `/ai-cache-rules`, `/ai-context-rules`, `/traffic-mirror-rules` (lock retries exhausted), with a fixed `ErrMsg` of `Conflict: collection is being replaced concurrently, retry later`; the collection is left unchanged;
+- Narrowing a Provider's `model_protocols` while still referenced by a Cluster's `ensure_reasoning_content` (`ProviderProtocolRefChecker`); the message names the provider, the protocol, and the referencing clusters.
 
 Troubleshooting advice: when receiving a 409, first resolve the dependency identified by the referencing party name in `ErrMsg` (e.g. adjust route rules, rebind certificates, migrate child entities) and then retry the operation. When receiving a 500 whose `ErrMsg` contains no specific dependency information, treat it as an unknown error, collect logs, and contact the maintainers. When receiving a 403 whose response body is `Access Forbidden`, the request source IP has been rejected by the management-plane IP allowlist; adjust the allowlist configuration or access from an allowed network segment.
 

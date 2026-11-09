@@ -357,7 +357,7 @@ func rateLimitPolicyDataToParam(param *rate_limit_policy.RateLimitPolicyParam) *
 | `intent_config` | `table_intent_config.go` | `storage/rdb/iintent_config/` | 意图配置单例 |
 | `k8s_pools` | `table_k8s_pools.go` | `storage/rdb/k8s_pool/` | K8s 实例池，写入方唯一为 K8s 发现组件 |
 
-其中 `ai_cache_rules`、`ai_context_rules`、`traffic_mirror_rules` 为全量替换集合表（数组序即优先级），`intent_config`、`ai_cache_semantic_settings`、`ai_context_settings` 为单例行覆盖表，`k8s_pools` 的实例快照写入后在同一事务内扇出刷新引用 provider 的镜像与引用 cluster 的派生实例池（见 [第十章 Provider 与 Cluster 设计](../design/chapter10-provider-and-cluster.md)）。
+其中 `ai_cache_rules`、`ai_context_rules`、`traffic_mirror_rules` 为全量替换集合表（数组序即优先级），`intent_config`、`ai_cache_semantic_settings`、`ai_context_settings` 为单例行覆盖表，`k8s_pools` 的实例快照写入后不扇出，消费方按 `k8s_pool_name` 实时解析有效池（见 [第十章 Provider 与 Cluster 设计](../design/chapter10-provider-and-cluster.md)）。
 
 ### 操作日志与序号分配（2 张表）
 
@@ -382,7 +382,7 @@ func rateLimitPolicyDataToParam(param *rate_limit_policy.RateLimitPolicyParam) *
 
 新增可选字段通过加列方式演进，例如 `providers` 表在 v0.0.10 增加 `protocol_paths` TEXT 列（JSON，存"协议 → 上游 base path"映射），存量数据为 NULL 即未配置，无需数据迁移，应用层不读即忽略。
 
-`providers` 表的 K8s 实例供给能力同样以加列方式承载：`instance_source` VARCHAR(32) 列默认 `instance_pool`（取值 `instance_pool` / `k8s_pool`），`k8s_pool_name` VARCHAR(255) 列与 `k8s_instance_pool` JSON 列均可空，存量数据为 NULL 即缺省手工实例池模式，无需数据迁移，应用层经 `EffectiveInstancePool()` 契约按实例来源读取有效池（见[第十章 Provider 与 Cluster 设计](../design/chapter10-provider-and-cluster.md)）。
+`providers` 表的 K8s 实例供给能力以加列方式承载：`instance_source` VARCHAR(32) 列默认 `instance_pool`（取值 `instance_pool` / `k8s_pool`），`k8s_pool_name` VARCHAR(255) 列可空，存量数据为 NULL 即缺省手工实例池模式，无需数据迁移。当前 DDL 不含 `k8s_instance_pool` 镜像列；若数据库曾应用过 v0.0.10 → v0.0.11 增量预览脚本，需手工 `ALTER TABLE providers DROP COLUMN k8s_instance_pool;` 清理。应用层经 `InstancePoolResolver` 按实例来源实时查询 `k8s_pools` 表读取有效池（见[第十章 Provider 与 Cluster 设计](../design/chapter10-provider-and-cluster.md)）。
 
 从映射关系可以看出，Storage 子包的划分依据是业务域而非数据库表数量。例如 `cluster_conf` 子包同时管理 `clusters`、`sub_clusters`、`pools`、`lb_matrices` 四张表，因为这几张表共同服务于集群配置这一业务概念；`route_conf` 子包同时管理 `domains`、`route_basic_rules`、`route_advance_rules`、`route_default_rules`，因为它们共同组成产品级路由规则（AI 网关模式下不用于 AI 请求的 Cluster 选择，仅用于产品线识别上下文或非 AI 流量场景）。这种按业务域聚合的方式，让 Storage 接口更贴近模型层 Manager 的调用需求，避免了 Manager 同时依赖多个细粒度 Storage 的复杂局面。
 

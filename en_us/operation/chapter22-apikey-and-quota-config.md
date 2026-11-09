@@ -280,7 +280,9 @@ curl -X PATCH http://localhost:8183/open-api/v1/api-keys/apikey-001 \
   -d '{"enabled": false}'
 ```
 
-When modifying `quota_plan.quota` (unit unchanged), the system preserves the historical `used`, adjusts the balance as `remaining = max(0, new quota - used)`, and atomically adjusts Redis via `IncrBy(delta)`. This design avoids clearing historical usage during ordinary quota adjustments. When modifying `unit` or `unlimited`, since the old and new units cannot be converted, `used = 0` and `remaining = new quota` are reset, and Redis is updated to the new values.
+When modifying `quota_plan.quota` (unit unchanged), the system preserves the historical `used` and adjusts the balance as `remaining = new quota - used` (when the new quota does not cover the used amount, `remaining` may go negative, the overage is preserved, and authentication keeps rejecting), and atomically adjusts Redis via `IncrBy(delta)`. This design avoids clearing historical usage during ordinary quota adjustments. When modifying `unit` or `unlimited`, since the old and new units cannot be converted, `used = 0` and `remaining = new quota` are reset, and Redis is updated to the new values.
+
+> **Overage presentation**: when the Redis balance is negative, the external `Balance.Remaining` is still displayed as 0, while `used` may exceed `quota`; the Dashboard caps the usage percentage at 100% (the progress bar does not overflow in the overage state). See "Overage Model" in [Chapter 12 Quota and Rate Limit Design](../design/chapter12-quota-and-rate-limit.md).
 
 If an API-Key is attached to a new Entity, the Control Plane only validates that the target Entity exists; no valid Quota Plan is required on the Entity or any of its ancestors.
 

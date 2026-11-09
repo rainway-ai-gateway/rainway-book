@@ -443,8 +443,22 @@ Billing for image_generation and video_generation is driven by the matched price
 
 When the price table has no entry for a given `(model, mode)` (for example, a model used via the `/responses` entry only has a `mode=chat` price), BFE falls back to the same model's chat price instead of billing 0. This behavior comes with observability markers:
 
-- The module counters `PriceFallbackUsed` (fallback billing) and `PriceLookupMiss` (no fallback baseline at all) track the two cases (`bfe/bfe_modules/mod_ai_token_auth/mod_ai_token_auth.go`);
+- The module counters `PriceFallbackUsed` (fallback billing) and `PriceMissZeroBilled` (no fallback baseline at all) track the two cases (`bfe/bfe_modules/mod_ai_token_auth/mod_ai_token_auth.go`);
 - The access log carries the `ai_price_miss` field (pb field 763, `bfe-access-pb` ≥ v0.3.14): both kinds of miss set it to true, distinguishing "under-priced/0-billing rows without pricing" from legitimate zero-cost rows. Field details are in [Chapter 32: Token Authentication and Quota Module Implementation: mod_ai_token_auth](../implementation/chapter32-mod-ai-token-auth.md).
+
+#### Price-Miss Actions
+
+Price-miss behavior is governed by an explicit cluster-level configuration `llm_config.price_miss_action` (snake_case in storage, exported as the PascalCase `AIConf.PriceMissAction`), with three states:
+
+| Value | Semantics |
+|------|-----------|
+| `fallback_chat` (default) | Bill at the same model's chat price (i.e. the fallback behavior above) |
+| `bill_zero` | Forward normally but bill 0 |
+| `reject` | **Reject before forwarding**: 503 `PRICE_NOT_CONFIGURED`, no upstream call and no billing, while the access log row is still written with the price-miss signal |
+
+A missing `ModelTable` as a whole is treated as unpriced (and likewise rejected under `reject`); the fail-open behavior when a cluster lookup fails is unchanged. Illegal values are rejected with 422 on the Control Plane export side and by `AIConfCheck` on the Data Plane load side; existing clusters without the field need no migration (BFE normalizes it to `fallback_chat`).
+
+Observability reports a **signal pair**: `ai_price_miss` (bool, field 763) and `ai_price_warn` (string, field **766**, `bfe-access-pb` ≥ v0.3.17, with six forms — `fallback` / `subitem_missing` / `no_entry` / `no_baseline` / `no_model_table` / `reject`; the most specific cause wins). Both fields adopt the **NULL = not reported** semantics, and `ai_price_miss` is written at **request level** (`reject` 503 rows carry the signal too). The report detail table has **101** columns (the two price-miss columns sit after `ai_intent_questions_version`), and the query API supports an exact `price_warn` filter (whitelist-validated; illegal values return 422). The companion counters are `PriceMissZeroBilled` (price miss billed 0) / `PriceRejected` / `PriceFallbackSubItemMiss`. Known and accepted residual: a missing sub-item price (e.g. cache read/write price keys) bills 0 without rejecting.
 
 ### Backward Compatibility
 
@@ -599,7 +613,7 @@ After the above configuration is exported to BFE, calls to `deepseek-v3` between
 - The BFE Data Plane keeps prices as `float64` after loading (negative values fail loading); at runtime, based on Token usage and the active tier, each line item is converted via `quota.CalcCostUnits` into a 1e-8-RMB fixed-point integer and accumulated, while Redis deduction and the monetary semantics of existing configurations remain unchanged.
 - Chat billing starts from the total input Tokens and splits out cache read/write, image input, audio input, and other dimensions; when no refinement price keys are configured, it falls back to the legacy formula.
 - image_generation / video_generation discriminate by "whether the price key exists" (`ModelPrice.HasPrice`): a missing per-unit price key falls back to the chat token formula, while an explicit zero price is still billed per unit (cost 0).
-- When the price table has no entry for a `(model, mode)`, billing falls back to the same model's chat price, with observability via the counters `PriceFallbackUsed` / `PriceLookupMiss` and the access log field `ai_price_miss`.
+- When the price table has no entry for a `(model, mode)`, billing falls back to the same model's chat price, with observability via the counters `PriceFallbackUsed` / `PriceMissZeroBilled` and the access log field `ai_price_miss`.
 - Batch tasks are priced through `mode=batch` price rows and the `batch_discount` factor: export expands them into explicit batch price rows, manually maintained batch rows take precedence over coefficient expansion, and batch settlement uses the base price `usage_in × input + usage_out × output` (tiered prices are not integrated in this phase).
 - Anthropic usage is normalized at the protocol adapter layer to total-input semantics (`input_tokens + cache_read + cache_creation`), aligning with OpenAI's `prompt_tokens`; Responses API `input_tokens` follows subset semantics that already include `cached_tokens` and are taken directly as `PromptTokens` without additive normalization; two billing modes are supported: `responses` (reusing chat billing) and `video_generation` (billed as `output_cost_per_video` × video count).
 - After the Provider and Cluster concepts were separated, `model-prices.provider` serves only as a price grouping identifier and has a weak reference relationship with `/providers`, making configuration more flexible; `AIConf.ModelTable` is assembled by the Control Plane by provider at export time.

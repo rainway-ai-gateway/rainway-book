@@ -68,8 +68,8 @@ Key field descriptions:
 - `keys`: A list of API-Keys, each containing a `name` and a `key` (key material). The `name` is used for cluster references. In the database the column holding this field, `providers.api_keys`, is `MEDIUMTEXT`, with the entire key pool serialized into a single `enc$v1$` envelope ciphertext (not per-field encryption). When `[Security].MasterKeyFile` is configured, the Control Plane self-checks that column type at startup and refuses to start if it is still a JSON type; the read path returns 500 for an undecryptable value (see [Chapter 17 Security Design](./chapter17-security-design.md)). Keys in distributed configuration files travel in envelope form as well, and only the Data Plane uses them in plaintext after loading.
 - `instance_pool`: The backend instance pool. When the instance source is manual maintenance (the default), it must contain at least one instance, and at least one instance must have `weight > 0`; when the instance source is a K8s Pool, this field is not validated — see "K8s Pool Provisioning" below.
 - `instance_source`: The instance provisioning mode: `instance_pool` (manual maintenance, the default) or `k8s_pool` (maintained by the K8s discovery component).
-- `k8s_pool_name`: Required when `instance_source=k8s_pool`; references a K8s Pool by name.
-- `k8s_instance_pool`: A read-only mirror of the K8s Pool, synced by the Control Plane from the `k8s_pools` table; a request body carrying this field is rejected with 422.
+- `k8s_pool_name`: Required when `instance_source=k8s_pool`; references a K8s Pool by name. The legal length is **128** characters.
+- `k8s_instance_pool`: **Not present in the current API**. Providers do not store an instance mirror; consumers (cluster instance snapshots, exports, report joins) query the `k8s_pools` table on demand via `k8s_pool_name`. Carrying the field in a request body is silently ignored as an unknown field. See "K8s Pool Provisioning" below.
 - `model_protocols`: The supported model access protocols; the current enum values are `openai`, `anthropic`, and `gemini`, with at least one required.
 - `protocol_paths`: Optional. A declarative mapping of protocol -> upstream base path, used to rewrite the standard entry `/v1/...` to the provider's native prefix; see "Protocol Path Rewriting" below.
 - `time_zone` / `tiers`: Used for peak/off-peak price matching; only the `peak` tier is supported initially.
@@ -152,7 +152,9 @@ Key field descriptions:
 - `llm_config`: The AI LLM service configuration; must include `provider`, and `models` must be a subset of the owning provider's `models`.
 - `llm_config.keys`: Only `name` and `weight` are kept; `name` must reference an existing key in the provider.
 - `llm_config.key_policy`: Multi-Key selection policy and retry backoff; currently `strategy` only supports `weighted_random`.
-- `llm_config.key_affinity`: Session-level Key affinity based on Redis + `ClientKeyId`.
+- `llm_config.key_affinity`: Session-level Key affinity based on Redis + `ClientKeyId`, with two configurable penalty TTLs (see "Key Affinity" below).
+- `llm_config.price_miss_action`: Optional price-miss handling with three states (`fallback_chat` / `bill_zero` / `reject`, defaulting to `fallback_chat`); see [Chapter 13 Model Pricing and Cost Accounting Design](./chapter13-model-pricing.md).
+- `llm_config.ensure_reasoning_content`: Optional protocol list for reasoning-content completion (only `openai` / `anthropic`; empty = disabled); see [Chapter 7 Data Plane Forwarding Design: BFE](./chapter07-data-plane-design.md).
 - `llm_config.normalize_upstream_error`: Optional upstream error normalization configuration; see "Upstream Error Normalization" below.
 
 ## Why Provider and Cluster Are Decoupled, and the Benefits
@@ -233,27 +235,26 @@ In addition to the manually maintained `instance_pool`, a Provider's instance so
 
 ### Dual-Mode Instance Source
 
-The `providers` table expresses the dual-mode instance source with three fields:
+The `providers` table expresses the dual-mode instance source with two fields (the schema and responses have no `k8s_instance_pool` mirror column):
 
 | Field | Type | Description |
 |------|------|------|
 | `instance_source` | `VARCHAR(32)`, default `instance_pool` | Instance provisioning mode: `instance_pool` means the instance list is maintained manually; `k8s_pool` means instances are supplied by the K8s discovery component |
 | `k8s_pool_name` | `VARCHAR(255)`, nullable | Required when `instance_source=k8s_pool`; the name of the referenced K8s Pool |
-| `k8s_instance_pool` | JSON, nullable | Read-only mirror of the K8s Pool, synced and written by the Control Plane from the `k8s_pools` table; an OpenAPI request body carrying this field is rejected with 422 |
 
-The naming rule for `k8s_pool_name` is 1-64 characters, allowing only letters, digits, and `_`, `-`, `.`, and it must not start or end with `.`, `-`, or `_`. The referenced pool does not need to exist in advance: a missing pool is equivalent to zero instances, and instances appear automatically once the discovery component performs its first sync.
+The naming rule for `k8s_pool_name` is **1-128** characters, allowing only letters, digits, and `_`, `-`, `.`, and it must not start or end with `.`, `-`, or `_`. The referenced pool does not need to exist in advance: a missing pool is equivalent to zero instances, and instances appear automatically once the discovery component performs its first sync.
 
 ### Effective Instance Pool Contract
 
-`EffectiveInstancePool()` in `model/iprovider/provider.go` defines the Effective Instance Pool contract, which is the single entry point through which downstream code consumes an instance pool:
+Providers store no instance mirror; consumers query the `k8s_pools` table on demand via `k8s_pool_name` (`InstancePoolResolver` resolves the effective pool, and `EffectiveInstancePool()` in `model/iprovider/provider.go` is the single downstream entry point):
 
 ```text
-EffectiveInstancePool(p) = p.instance_source == "k8s_pool" ? p.k8s_instance_pool : p.instance_pool
+EffectiveInstancePool(p) = p.instance_source == "k8s_pool" ? query k8s_pools[p.k8s_pool_name] on demand : p.instance_pool
 ```
 
-- Cluster instance snapshot creation, instance pool synchronization, and change detection all read the effective pool through this contract; they never touch the raw `instance_pool` / `k8s_instance_pool` fields directly.
-- When the merged `instance_source` being written resolves to `instance_pool`, the `k8s_instance_pool` mirror is forcibly cleared — under `instance_pool` mode the mirror is always empty.
-- A legitimate empty pool can only occur in `k8s_pool` mode: when the effective pool is empty, clusters referencing this provider are delivered with an empty entry, BFE accepts the load, and requests to that cluster return 500 (`BK_NO_BACKEND`, message `no available backend for this request`), which must be paired with alerting; a sub-cluster missing from `cluster_table` is likewise treated as having no backend, and the same error appears after a hot reload releases old instances. The non-empty validations under `instance_pool` mode (at least one instance, (addr, port) deduplication, at least one `weight > 0`) remain unchanged.
+- Cluster instance snapshot creation, instance pool synchronization, change detection, exports, and report joins all read the effective pool through this contract and never touch the raw `instance_pool` field directly; an empty pool name or a missing pool returns an empty list, and read failures fail closed (return empty).
+- On-demand resolution is independent of creation order: a pool-mode provider created after the pool's `PUT` still resolves the current pool instances.
+- A legitimate empty pool can only occur in `k8s_pool` mode: when the effective pool is empty, the K8s-mode cluster's derived pool is an empty placeholder that carries no instances, and clusters referencing this provider are delivered with an empty entry; BFE accepts the load, and requests to that cluster return 500 (`BK_NO_BACKEND`, message `no available backend for this request`), which must be paired with alerting. The non-empty validations under `instance_pool` mode (at least one instance, (addr, port) deduplication, at least one `weight > 0`) remain unchanged.
 
 ### The k8s_pools Table and Maintenance Endpoints
 
@@ -264,9 +265,20 @@ The `k8s_pools` table registers all K8s Pools (`name` unique, `instances` JSON, 
 | `PUT /inner-api/v1/k8s_pools/{name}/instances` | Full-replacement of the instance list; the request body is a bare JSON array. Instance `addr` is required, `port` ranges 1-65535, `weight` ranges [0,100] and defaults to 100, and the (addr, port) combination must be unique within the pool; an empty array is valid and equivalent to zero instances |
 | `GET /inner-api/v1/k8s_pools` | Pool list, including `instance_count` / `last_sync_time` |
 | `GET /inner-api/v1/k8s_pools/{name}` | Query a single pool; returns 404 when the pool does not exist |
-| `DELETE /inner-api/v1/k8s_pools/{name}` | Deleting a pool has no reference protection; the mirrors of providers referencing this pool are cleared accordingly |
+| `DELETE /inner-api/v1/k8s_pools/{name}` | Deleting a pool referenced by a Provider keeps the pool record and clears its instances (the detail query returns 200 with `instance_count=0`); pools without references are physically deleted |
 
-After a successful write, the Control Plane completes the fan-out in a single transaction (`K8sPoolManager.ReplaceInstances` / `DeletePool` in `model/ik8s_pool/k8s_pool.go`): it refreshes the `k8s_instance_pool` mirrors of all providers referencing the pool and synchronously updates the derived instance pools of referencing clusters; empty pools also participate in the sync, i.e. clear semantics. If any step of the fan-out fails, the entire write is rolled back, keeping the pool record, the provider mirrors, and the cluster derived pools consistent.
+The write path performs no fan-out: `PUT` / `DELETE` only maintain the `k8s_pools` table itself (`K8sPoolManager.ReplaceInstances` / `DeletePool` in `model/ik8s_pool/k8s_pool.go`) and never write derived data to providers / clusters / pools; instances are resolved on demand by `k8s_pool_name` at consumption time (see "Effective Instance Pool Contract" above).
+
+### Read-Only Queries
+
+The Control Plane exposes a **read-only OpenAPI** for K8s Pools (authorized by `FeatureK8sPool` + `ActionRead`; no write endpoints and no pagination):
+
+| Endpoint | Description |
+|------|------|
+| `GET /open-api/v1/k8s_pools` | Pool list: `list[]` (`name` / `instance_count` / `last_sync_time`); an empty result is `[]` rather than 404 |
+| `GET /open-api/v1/k8s_pools/{name}` | Pool detail: `name` + `instances[]` (`addr` / `port` / `weight` / `disable` read-only) + `instance_count` + `last_sync_time`; 404 when the pool does not exist, 200 for an empty pool |
+
+Dashboard uses these to render the provider-page pool name as a dropdown and to show the live instance table on the edit/detail pages.
 
 ## AIConf Generation
 
@@ -493,7 +505,9 @@ Key Policy works together with Key Affinity: Affinity ensures that the same clie
     "enabled": true,
     "ttl": 600,
     "redis_prefix": "bfe:ai:key_affinity",
-    "penalty_enable": true
+    "penalty_enable": true,
+    "penalty_ttl_429": 60,
+    "penalty_ttl_auth": 300
 }
 ```
 
@@ -502,7 +516,11 @@ Field descriptions:
 - `enabled`: Whether to enable session-level Key affinity.
 - `ttl`: The binding idle timeout, in seconds; after a binding is hit, BFE refreshes the TTL, and the binding persists as long as requests continue.
 - `redis_prefix`: The Redis key prefix.
-- `penalty_enable`: Whether to enable Key penalty; when `true`, Keys that have recently returned 429/401/403 are skipped.
+- `penalty_enable`: Whether to enable Key penalty; when `true`, Keys that have recently returned 429/401/402/403 are skipped.
+- `penalty_ttl_429`: The 429-tier penalty TTL in seconds, default 60, legal range [10, 600].
+- `penalty_ttl_auth`: The 401/402/403-tier penalty TTL in seconds, default **300**, legal range [60, 1800]. `0`/negative/out-of-range values are rejected with 422 and not persisted; shortening the configuration does not retroactively update existing Redis penalty keys.
+
+`key_affinity` follows **replace-whole** semantics: submitting a fragment backfills defaults for the missing sub-fields and resets the rest — to change a single field, GET first and then submit the complete `llm_config`. The Control Plane never delivers `0` to the Data Plane (Redis `expire=0` means never expire), and existing clusters with a nil `key_affinity` are exported with 60/300 as well.
 
 Key Affinity is ultimately mapped to the `SessionAffinity*` related fields of `AIConf` and delivered to BFE.
 
@@ -618,7 +636,7 @@ This chapter detailed the design of Provider and Cluster in Rainway AI Gateway.
 - **Decoupling benefits**: clearer responsibilities, less duplicate configuration, clusters no longer expose key plaintext, transparent to BFE, and weak references between model-prices and provider.
 - **AIConf generation**: The Control Plane joins the data of Providers and Clusters by name to generate the instance pools, sub-clusters, `AIConf.Keys`, `AIConf.ModelTable`, `AIConf.ModelProtocols`, and other fields required by BFE.
 - **Model discovery**: Probes the third-party model list via `/providers/tools/discover-models` and then backfills it into the Provider.
-- **K8s Pool provisioning**: `instance_source` dual mode (manual `instance_pool` / `k8s_pool` maintained by the K8s discovery component); `EffectiveInstancePool()` is the single consumption entry for downstream code; K8s Pools are written exclusively by the discovery component via the InnerAPI, and after each write a single transaction fans out to refresh the provider mirrors and the derived instance pools of referencing clusters.
+- **K8s Pool provisioning**: `instance_source` dual mode (manual `instance_pool` / `k8s_pool` maintained by the K8s discovery component); `EffectiveInstancePool()` is the single consumption entry for downstream code; K8s Pools are written exclusively by the discovery component via the InnerAPI; writes perform no fan-out, and instances are resolved on demand by `k8s_pool_name` at consumption time.
 - **Key mechanisms**: A Cluster references the Provider's keys by `name` and sets weights; `key_policy` controls the selection policy and retry backoff; `key_affinity` provides Redis-based session-level Key affinity.
 - **Upstream error normalization**: `llm_config.normalize_upstream_error` maps upstream errors to a unified `UPSTREAM_*` error catalog through the protocol adapters; all fields are optional and default to the historical pass-through behavior; it is exported as `AIConf.NormalizeUpstreamError`, with defaults synthesized by BFE at load time.
 

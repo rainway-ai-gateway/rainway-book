@@ -3,7 +3,7 @@
 ## A
 
 **ai-gateway-controller (formerly Service Controller)**
-: A controller deployed inside a Kubernetes cluster; it watches Services carrying the `ai-gateway-api-name` label together with their same-named Endpoints, and for each named port reports the Ready instances in full via the InnerAPI `PUT /inner-api/v1/k8s_pools/{name}/instances` as a K8s pool. The Control Plane fans the pool members out to the Provider mirror and Cluster derived pools, which then reach BFE through the `cluster_table` export.
+: A controller deployed inside a Kubernetes cluster; it watches Services carrying the `ai-gateway-api-name` label together with their same-named Endpoints, and for each named port reports the Ready instances in full via the InnerAPI `PUT /inner-api/v1/k8s_pools/{name}/instances` as a K8s pool. The Control Plane performs no fan-out: every consumer resolves the effective pool on demand by `k8s_pool_name`, which then reaches BFE through the `cluster_table` export.
 
 **AI Business Cluster (Cluster)**
 : A logical backend unit that references a Provider and configures forwarding policies, determining how traffic is forwarded, which models are used, and how Key weights are distributed.
@@ -47,7 +47,7 @@
 ## E
 
 **Effective Instance Pool**
-: The set of backend instances actually in effect for a Provider (the K8s pool mirror when in `k8s_pool` mode, otherwise `instance_pool`); the sole consumption contract downstream of the Control Plane.
+: The set of backend instances actually in effect for a Provider (queried live from the K8s pool when in `k8s_pool` mode, otherwise `instance_pool`); the sole consumption contract downstream of the Control Plane.
 
 **Entity (Organization)**
 : A grouping of callers that can represent a department, team, or project. Each Entity can have quota plans, rate limit policies, model allowlists/blocklists, and routing rules attached.
@@ -93,7 +93,10 @@
 : The set of backend instances reported and maintained in full by ai-gateway-controller via the InnerAPI `/inner-api/v1/k8s_pools`; that controller is the sole writer of the pool members. A Provider can switch its instance source (`instance_pool` / `k8s_pool`) and the result is delivered under the Effective Instance Pool contract.
 
 **Key Affinity**
-: Session-level Key affinity implemented based on Redis; the same `ClientKeyId` keeps hitting the same Provider Key within a certain period of time; the Redis connection is held by the `[AIKeyAffinity]` section of `bfe.conf`.
+: Session-level Key affinity implemented based on Redis; the same `ClientKeyId` keeps hitting the same Provider Key within a certain period of time; the Redis connection is held by the `[AIKeyAffinity]` section of `bfe.conf`. The penalty durations are configurable (`penalty_ttl_429` defaults to 60s and `penalty_ttl_auth` to 300s).
+
+**expr Condition Engine (Expression Engine)**
+: The condition expression engine based on expr-lang/expr (the `bfe_expr` package), coexisting with the 53 legacy condition primitives; `ConditionEngineMode` in `bfe.conf` selects among `LegacyFirst` (default), `ExprCompatible`, and `ExprOnly`, and action parameters support `=expr` dynamic evaluation.
 
 ## M
 
@@ -127,6 +130,12 @@
 
 **protocol_paths (Protocol Path Mapping)**
 : An optional field on a Provider declaring the upstream base path for each model protocol (`openai`/`anthropic`); BFE rewrites the standard entry `/v1/...` to the provider's native prefix based on it, and forwards unchanged when it is unconfigured (the `gemini` protocol does not support path rewriting).
+
+**Price-Miss Action (PriceMissAction)**
+: A cluster-level configuration (`llm_config.price_miss_action`) defining the behavior when a model/mode has no price entry, with three states: `fallback_chat` (default; bill at the same model's chat price) / `bill_zero` (bill 0) / `reject` (reject before forwarding with 503 `PRICE_NOT_CONFIGURED`); signals are reported end-to-end via the `ai_price_miss` / `ai_price_warn` access-log fields.
+
+**Quota Overage**
+: The balance model: quota deduction is not truncated at 0, so the Redis balance may go negative and overages are recorded faithfully; authentication keeps rejecting negative balances (429), while externally `remaining` displays 0 and `used` may exceed `quota`.
 
 **Allow When Quota Exhausted**
 : An optional switch on a quota plan; when enabled, requests are still allowed after the quota balance reaches 0 (usage continues to be tracked), which suits the trial-run phase; when disabled, insufficient balance causes rejection.
@@ -174,6 +183,9 @@
 
 **Tier (Time Period Level)**
 : The price level divided by time dimension in model pricing; only the `peak` (busy hours) tier is supported initially. The busy-hours windows are maintained in the Provider resource (tiered pricing configuration).
+
+**Reasoning-Content Completion (EnsureReasoningContent)**
+: A cluster-level configuration (`llm_config.ensure_reasoning_content`, a protocol list with only `openai`/`anthropic`; empty = disabled); for reasoning-mode upstreams that require `reasoning_content` to be echoed back, BFE patches empty values into assistant messages within the validation window, preventing the first request after a route switch from being rejected with 400.
 
 **Token**
 : A programmatic access credential created via `/auth/tokens`, with Scopes `System` (full management permissions), `SystemReadonly` (read-only management permissions) and `Support` (read-only export permissions).

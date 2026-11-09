@@ -94,7 +94,7 @@ API-Key 是 AI 网关的入口凭证。壬远 AI 网关提供 API-Key 的全生�
 | **Dashboard** | 管理控制台 | 基于 Web 的可视化管理界面，调用 OpenAPI 完成配置操作 |
 | **BFE** | 数据面（Data Plane） | 负责流量转发、接入控制、AI 路由、配额校验、限流执行等 |
 | **Conf Agent** | 配置代理 | 从 InnerAPI 拉取最新配置并触发 BFE 热加载，无需重启数据面 |
-| **ai-gateway-controller** | 服务发现 | 在 Kubernetes 环境中把 Service/Endpoints 的 Ready 实例上报为 K8s 实例池（InnerAPI `k8s_pools`），经控制面扇出到 Provider 镜像与 Cluster 派生池，再由 `cluster_table` 导出到 BFE |
+| **ai-gateway-controller** | 服务发现 | 在 Kubernetes 环境中把 Service/Endpoints 的 Ready 实例上报为 K8s 实例池（InnerAPI `k8s_pools`），控制面按 `k8s_pool_name` 实时解析有效池，再由 `cluster_table` 导出到 BFE |
 
 这五个组件的关系可以用下图概括：
 
@@ -159,7 +159,7 @@ Conf Agent 部署在 BFE 节点上，定期向 InnerAPI 拉取最新配置。当
 
 ### ai-gateway-controller
 
-ai-gateway-controller 是部署在 Kubernetes 集群内的控制器（基于 controller-runtime）。它监听带有 `ai-gateway-api-name` 标签的 Service 及其同名 Endpoints，按每个具名端口把 Ready 后端实例经 InnerAPI `PUT /inner-api/v1/k8s_pools/{name}/instances` 全量上报为「K8s 实例池」。控制面再把池成员扇出到引用该池的 Provider 镜像（`k8s_instance_pool`）与 Cluster 派生池，最终随 `cluster_table` 导出到 BFE。控制器不直接连接数据面，BFE 看到的仍是控制面导出的后端列表。
+ai-gateway-controller 是部署在 Kubernetes 集群内的控制器（基于 controller-runtime）。它监听带有 `ai-gateway-api-name` 标签的 Service 及其同名 Endpoints，按每个具名端口把 Ready 后端实例经 InnerAPI `PUT /inner-api/v1/k8s_pools/{name}/instances` 全量上报为「K8s 实例池」。控制面不做扇出，各消费方按 `k8s_pool_name` 实时查询 `k8s_pools` 表解析有效池，最终随 `cluster_table` 导出到 BFE。控制器不直接连接数据面，BFE 看到的仍是控制面导出的后端列表。
 
 ## 与 BFE 开源项目的关系
 

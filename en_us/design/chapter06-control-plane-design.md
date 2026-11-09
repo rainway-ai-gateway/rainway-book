@@ -27,7 +27,7 @@ The relationship between the AI Gateway API and its surrounding components in th
 | Dashboard | Management console | Calls the OpenAPI to perform visual operations |
 | BFE | Data Plane | Consumes configurations exported via InnerAPI and performs forwarding |
 | Conf Agent | Configuration agent | Polls InnerAPI, pulls the latest configuration, and triggers BFE hot reload |
-| ai-gateway-controller (formerly Service Controller) | Service discovery | Reports the Ready instances of K8s Services/Endpoints as a K8s pool (InnerAPI `k8s_pools`); the Control Plane then fans it out to the Provider mirror and Cluster derived pools, and finally exports it to BFE through `cluster_table` |
+| ai-gateway-controller (formerly Service Controller) | Service discovery | Reports the Ready instances of K8s Services/Endpoints as a K8s pool (InnerAPI `k8s_pools`); the Control Plane resolves the effective pool on demand by `k8s_pool_name`, and finally exports it to BFE through `cluster_table` |
 
 The current functional scope of the AI Gateway API covers: API-Key / Entity / Entity-Type management, Provider and Cluster management, model pricing management, QuotaPlan and RateLimitPolicy management, AI routing rule management, AI cache rules, traffic mirror rules, intent configuration, context compression rules, K8s Pool management, certificate and extra file management, authentication and authorization, configuration operation log auditing, and configuration export for the Data Plane.
 
@@ -112,7 +112,7 @@ Key packages are as follows:
 | `model/ai_context/` | Context compression rules and global settings: business logic and export |
 | `model/traffic_mirror/` | Traffic mirror rules: business logic and export |
 | `model/iintent_config/` | Intent configuration singleton: business logic and export |
-| `model/ik8s_pool/` | K8s Pool maintenance and post-write fan-out synchronization |
+| `model/ik8s_pool/` | K8s Pool maintenance (no write fan-out; on-demand resolution at consumption) |
 | `model/itxn/` | Transaction abstraction interface `TxnStorager` |
 | `model/shared/` | Cross-package shared types and generic Storager interfaces |
 
@@ -407,14 +407,14 @@ Another detail on the query path: the DAO function `TOperationLogCount` removes 
 
 In `lib/xerror`, `WrapConflictErrorWithMsg` marks an error as `Model.Conflict`, which `resolve.go` maps uniformly to HTTP **409 Conflict**. It expresses the business semantics of "the resource is referenced by other resources and the operation has a dependency conflict":
 
-- A BFE cluster cannot be deleted while referenced by the `lb_matrix` (scheduler) of any AI cluster (`endpoints/openapi_v1/bfe_cluster/delete.go` calls `ClusterManager.IsBFEClusterUsed`; this previously returned 422);
+- A BFE cluster cannot be deleted while referenced by the `lb_matrix` (scheduler) of any AI cluster (`endpoints/openapi_v1/bfe_cluster/delete.go` calls `ClusterManager.IsBFEClusterUsed`);
 - A Pool cannot be deleted while referenced by a BFECluster / SubCluster;
 - A certificate cannot be deleted while referenced by a Product;
 - A product cluster cannot be deleted while referenced by routing rules (advance / basic);
 - A cluster cannot be deleted while referenced as the target / fallback of AI routing rules; updating cluster models also fails when they are referenced by rule target / fallback;
 - An Entity with children cannot be deleted.
 
-With the introduction of 409, 500 is restored as the fallback for unknown errors, while 422 remains reserved for parameter errors (`etParam`), so the semantics are no longer conflated with dependency conflicts.
+409 is used for dependency conflicts, 500 is the fallback for unknown errors, and 422 is reserved for parameter errors (`etParam`), so the three semantics are never conflated.
 
 ---
 
