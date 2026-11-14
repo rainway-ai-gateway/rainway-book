@@ -4,7 +4,7 @@
 
 ## BFE 数据面错误码（v1.9.0）
 
-- [BFE AI 网关错误码说明](https://github.com/bfenetworks/bfe/blob/refs/heads/v1.9.0-dev/docs/zh_cn/sys_design/ai_error_codes.md)
+- [BFE AI 网关错误码说明](https://github.com/bfenetworks/bfe/blob/refs/tags/v1.9.0/docs/zh_cn/sys_design/ai_error_codes.md)
 
 该文档覆盖以下内容：
 

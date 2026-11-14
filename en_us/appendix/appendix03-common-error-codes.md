@@ -4,7 +4,7 @@ This book involves two categories of error codes: the OpenAI-compatible error co
 
 ## BFE Data Plane Error Codes (v1.9.0)
 
-- [BFE AI Gateway Error Codes](https://github.com/bfenetworks/bfe/blob/refs/heads/v1.9.0-dev/docs/zh_cn/sys_design/ai_error_codes.md)
+- [BFE AI Gateway Error Codes](https://github.com/bfenetworks/bfe/blob/refs/tags/v1.9.0/docs/zh_cn/sys_design/ai_error_codes.md)
 
 That document covers the following:
 
