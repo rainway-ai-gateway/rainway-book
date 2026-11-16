@@ -280,7 +280,9 @@ curl -X PATCH http://localhost:8183/open-api/v1/api-keys/apikey-001 \
   -d '{"enabled": false}'
 ```
 
-修改 `quota_plan.quota`（单位不变）时，系统会保留历史 `used`，按 `remaining = max(0, 新 quota - used)` 调整余额，并通过 `IncrBy(delta)` 原子调整 Redis。这种设计避免了普通调额时清空历史用量。修改 `unit` 或 `unlimited` 时，由于新旧单位无法换算，会重置 `used = 0`、`remaining = 新 quota`，并将 Redis 同步为新值。
+修改 `quota_plan.quota`（单位不变）时，系统会保留历史 `used`，按 `remaining = 新 quota - used` 调整余额（新配额不足覆盖已用量时 `remaining` 可为负，欠费被保留、鉴权继续拒绝），并通过 `IncrBy(delta)` 原子调整 Redis。这种设计避免了普通调额时清空历史用量。修改 `unit` 或 `unlimited` 时，由于新旧单位无法换算，会重置 `used = 0`、`remaining = 新 quota`，并将 Redis 同步为新值。
+
+> **欠费展示**：Redis 余额为负时，对外 `Balance.Remaining` 仍展示 0，`used` 可大于 `quota`；Dashboard 的用量百分比封顶 100% 展示（欠费状态进度条不溢出）。详见 [第十二章 配额与限流设计](../design/chapter12-quota-and-rate-limit.md)「欠费模型」。
 
 若将 API-Key 挂载到新的 Entity，控制面只校验目标 Entity 存在，对 Entity 及其祖先链上是否存在有效 Quota Plan 没有要求。
 

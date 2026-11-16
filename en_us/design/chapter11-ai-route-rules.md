@@ -331,6 +331,22 @@ In implementation, `WeekdayMatcher` compiles `weekday_list` into a `uint8` bitma
 
 On the Control Plane side, after the bfe dependency is upgraded, every entry point that saves or validates condition expressions — route rules, AI cache rules, AI context rules, traffic mirroring rules, and `PATCH /expression/verify` — accepts this primitive; illegal values (such as `"7"` or an invalid `zone`) are still rejected by the compile-time validation with a 422.
 
+## Conditional Expression Engine expr
+
+BFE provides a condition engine based on expr-lang/expr (the `bfe_expr` package) on top of the legacy primitives; the legacy primitives are function-wrapped through a compatibility layer (covering all 53 existing primitives), and `condition.Build` dispatches according to `ConditionEngineMode` in `bfe.conf [Server]`:
+
+| Mode | Semantics |
+|------|-----------|
+| `LegacyFirst` (default) | Legacy engine first, falling back to expr when a legacy primitive fails to compile; byte-for-byte identical to legacy-primitive behavior |
+| `ExprCompatible` | expr and legacy primitives may be mixed; compile failures are rejected |
+| `ExprOnly` | Pure expr; legacy primitive names are treated as unknown functions |
+
+The mode accepts the numeric aliases `0/1/2` and any letter case; **invalid values fail startup**; the mode is process-wide — hot reload does not apply, and changing it requires a restart. Under expr modes, the `cond` field of route rules and all the validation entry points above go through the same compilation pipeline.
+
+expr mode can express logic that is hard to compose with legacy primitives (arithmetic, boolean combinations, variable functions) and can read Redis through dynamic data sources (`RedisEnv` with `Get` / `GetInt` / `HGetAll`; misses and errors return zero values without failing; default conn 100ms / read 300ms / write 300ms). Mind the intentional differences between the engines: string escapes follow Go rules (a regex `\.` must be written `\\.` / backquoted / `[.]` in expr); the legacy `res_code_in` primitive compares strings while the modern `ResCode()` compares integers; and the hash empty-input bucket semantics differ. Expression errors are treated as `false` plus a warning and never fail the request.
+
+On the action-parameter side, shared actions of `mod_redirect` / `mod_header` support the `=expr` prefix (see [Chapter 7 Data Plane Forwarding Design: BFE](./chapter07-data-plane-design.md)). The Control Plane save path is unchanged — `validate.ConditionExpression` still calls `condition.Build`, and the same validation constrains both engines.
+
 ## Binding Order and File Format Exported to BFE
 
 ### Export Structure

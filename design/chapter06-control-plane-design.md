@@ -27,7 +27,7 @@
 | Dashboard | 管理控制台 | 调用 OpenAPI 完成可视化操作 |
 | BFE | 数据面 | 消费 InnerAPI 导出的配置并执行转发 |
 | Conf Agent | 配置代理 | 轮询 InnerAPI，拉取最新配置并触发 BFE 热加载 |
-| ai-gateway-controller（原名 Service Controller） | 服务发现 | 把 K8s Service/Endpoints 的 Ready 实例上报为 K8s 实例池（InnerAPI `k8s_pools`），控制面再扇出到 Provider 镜像与 Cluster 派生池，最终经 `cluster_table` 导出到 BFE |
+| ai-gateway-controller（原名 Service Controller） | 服务发现 | 把 K8s Service/Endpoints 的 Ready 实例上报为 K8s 实例池（InnerAPI `k8s_pools`），控制面按 `k8s_pool_name` 实时解析有效池，最终经 `cluster_table` 导出到 BFE |
 
 AI Gateway API 当前的功能范围覆盖：API-Key / Entity / Entity-Type 管理、Provider 与 Cluster 管理、模型定价管理、配额计划与限流策略管理、AI 路由规则管理、AI 缓存规则、流量镜像规则、意图配置、上下文压缩规则、K8s 实例池管理、证书与附加文件管理、认证授权、配置操作日志审计以及面向数据面的配置导出。
 
@@ -112,7 +112,7 @@ AI Gateway API 采用经典的三层架构，将 HTTP 处理、业务逻辑与�
 | `model/ai_context/` | 上下文压缩规则与全局设置的业务逻辑与导出 |
 | `model/traffic_mirror/` | 流量镜像规则的业务逻辑与导出 |
 | `model/iintent_config/` | 意图配置单例的业务逻辑与导出 |
-| `model/ik8s_pool/` | K8s 实例池维护及写入后的扇出同步 |
+| `model/ik8s_pool/` | K8s 实例池维护（写入不扇出，消费时实时解析） |
 | `model/itxn/` | 事务抽象接口 `TxnStorager` |
 | `model/shared/` | 跨包共享类型与通用 Storager 接口 |
 
@@ -407,14 +407,14 @@ quota_plan 与 rate_limit_policy 没有独立的 OpenAPI 资源，但会随 Enti
 
 `lib/xerror` 中 `WrapConflictErrorWithMsg` 将错误标记为 `Model.Conflict`，由 `resolve.go` 统一映射为 HTTP **409 Conflict**，用于表达“资源被其他资源引用、操作存在依赖冲突”的业务语义：
 
-- BFE 集群被 AI 集群的 `lb_matrix` 调度引用时禁止删除（`endpoints/openapi_v1/bfe_cluster/delete.go` 调用 `ClusterManager.IsBFEClusterUsed` 检查，此前返回 422）；
+- BFE 集群被 AI 集群的 `lb_matrix` 调度引用时禁止删除（`endpoints/openapi_v1/bfe_cluster/delete.go` 调用 `ClusterManager.IsBFEClusterUsed` 检查）；
 - 实例池被 BFECluster / SubCluster 引用时禁止删除；
 - 证书被 Product 引用时禁止删除；
 - 产品集群被路由规则（advance / basic）引用时禁止删除；
 - 集群被 AI 路由规则的 target / fallback 引用时禁止删除；集群模型更新时被规则 target / fallback 引用时报错；
 - Entity 存在子节点时禁止删除。
 
-409 引入后，500 回归为兜底未知错误；422 保留给参数错误（`etParam`），语义不再与依赖冲突混用。
+409 用于依赖冲突，500 作为未知错误的兜底；422 保留给参数错误（`etParam`），三者语义互不混用。
 
 ---
 

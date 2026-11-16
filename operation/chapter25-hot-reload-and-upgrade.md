@@ -437,6 +437,22 @@ WriteTimeoutMs   = 1000
 - BFE 升级为 v1.8.9，并按上一节说明评估 `bfe.conf` 是否需要补充 `[AIKeyAffinity]` 段；
 - ai-gateway-epp 与前端随 AI Gateway API 同版本同步发布（EPP 相关组件互不兼容，混部将全 no-match 并显式告警）。
 
+### 升级到 v0.9.0（BFE v1.9.0 + API v0.1.0）
+
+目标组件组合为：BFE v1.9.0、AI Gateway API v0.1.0、Dashboard v0.1.0、Log Reader v1.6.0、ai-gateway-observability v0.1.0、bfe-access-pb v0.3.18；conf-agent v0.0.8、ai-gateway-epp v0.3.0、ai-gateway-controller v1.1.0 可继续使用（conf-agent 无需调整 Reloader）。
+
+**升级前检查（BFE v1.9.0 TLS 栈迁移，两项必做）**：
+
+1. `mod_header` 规则文件（`header_rule.data` 及其它 `mod_header` 规则）若引用 `%tls_ja3_raw` / `%tls_ja3_hash`，升级后会**整文件拒载**——须先删除或改写；会话日志消费方（文本 `ses_tls_client_random` / `ses_tls_server_random`、pb3 `HandshakeTime`）按字段消失调整；
+2. 曾启用 Redis `[SessionCache]` 的多实例部署：会话恢复退化为进程内 session ticket，握手率可能上升，须按现网拓扑压测确认。同时注意 `HttpsBasic.MaxTlsVersion` 默认 `VersionTLS12` → `VersionTLS13`、`MinTlsVersion` 默认 `VersionSSL30` → `VersionTLS10`，`CipherSuites` 行序不再影响协商优先级（纯白名单），未显式配置的部署升级后客户端可能协商到 TLS 1.3。
+
+**数据库变更**：
+
+- 控制面库：无新增表/列；`providers.k8s_instance_pool` 列定义已从 DDL 移除——**该列从未随 v0.0.11 发布**，只有加过预览版的库需要手工执行 `ALTER TABLE providers DROP COLUMN k8s_instance_pool;`；
+- 报表库：`bfe_ai_request_log` 99 → **101 列**。MySQL 形态在 `db_ddl_report_mysql.sql` 头部取两条 `ALTER TABLE ... ADD COLUMN ... AFTER ai_intent_questions_version` 语句；Doris / StarRocks / ClickHouse 形态按 `ai-gateway-observability` 的 `sqls/upgrade/2026-10-30-issue-1479-price-miss-columns/` 脚本执行（Doris 须**先加列、再重建**唯一键表；ClickHouse 的 Kafka 引擎表不能 ALTER，须按 HOWTO 重建导入链路；StarRocks 为纯 `ADD COLUMN`）。注意 Doris/StarRocks 目标列必须是 `BOOLEAN` / `VARCHAR(32)`，TINYINT 会把 JSON 布尔静默写成 NULL。
+
+**升级顺序（缺一不可）**：bfe-access-pb → BFE → AI Gateway API（可先行）+ 报表库 DDL → Log Reader → observability 三后端 schema → Dashboard。顺序颠倒的后果：报表库未加列时 log-reader 写 101 列失败或新列恒 NULL；缺价动作、推理内容补齐、惩罚时长三组字段均为"bfe 先行、控制面后跟"，反序发布会出现"控制台已可配、数据面未生效"。
+
 建议的升级顺序为：
 
 1. 备份数据库；

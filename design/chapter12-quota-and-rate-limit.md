@@ -131,6 +131,15 @@ Key 不再拼接 `KeyCreateAt` 时间戳，生命周期与 API-Key / Entity 保�
 
 **原子 SET（周期重置）**：周期重置使用 `ResetToQuotaAtomic`，通过 Lua 脚本执行 `redis.call('set', KEYS[1], ARGV[1])` 把余额直接置为配额总量。`IncrBy(delta)` 需要先读出当前值、再计算差值后写入，读与写之间存在时间窗：若期间有请求完成扣减，基于旧值算出的 delta 会使最终结果偏离配额总量；原子 SET 不依赖当前值，最终结果恒等于配额总量，只取决于 SET 与并发扣减的先后次序，从而消除了 read-modify-write 竞争。配合分布式锁（见下文）把全局重置收敛到单一实例后，SET 与请求链路扣减的竞争窗口也极小。
 
+### 欠费模型：余额可为负
+
+配额扣减采用全额 `DECRBY`（不做 `math.min(current, amount)` 截断），余额允许为负，欠费被如实记录：
+
+- 数据面扣减不做截断，余额可跌破 0；鉴权期 `HasBalance` 对负余额判“无余额”，请求返回 429 QuotaExhausted（行为不变），并提供 `QuotaOverage` 计数 + WARN 供欠费告警；
+- 控制面对外展示：`used = quota − remaining` 如实反映超额（**可大于 `quota`**），`Balance.Remaining` 在 Redis 余额为负时仍展示 0；调额路径（`adjustQuota` 等三处）不钳零，“欠费中调额”保留欠费（`remaining` 可为负，鉴权继续拒绝）；
+- 控制台侧用量百分比封顶 100% 展示，欠费态可识别；
+- 无数据迁移：Redis 单 key 模型不变；注意**升级前已被钉在 0 的存量 key，其历史超额无法找回**。
+
 ---
 
 ## 自然周/月重置与过期重置
@@ -410,7 +419,7 @@ BFE 收到配置后：
 
 限流返回的 429 表示"调用方超限"，而 `NO_AVAILABLE_KEY` 表示"网关上没有可用的上游凭证"，两者同为 429 但归因不同：
 
-- 集群内候选 Key 全部处于惩罚期（429 惩罚 60s，401/402/403 惩罚 3600s；仅在开启会话亲和惩罚时写入）时，Key 选择返回空候选，转发循环合成 429 `NO_AVAILABLE_KEY`（type `rate_limit_error`，message `no available upstream api key for this cluster`），响应带 `Retry-After` 与 `error.details.retry_after_seconds`，两者固定为 60s；
+- 集群内候选 Key 全部处于惩罚期（429 档与 401/402/403 档的惩罚时长由集群配置 `key_affinity.penalty_ttl_429` / `penalty_ttl_auth` 决定，默认 60s / **300s**；仅在开启会话亲和惩罚时写入）时，Key 选择返回空候选，转发循环合成 429 `NO_AVAILABLE_KEY`（type `rate_limit_error`，message `no available upstream api key for this cluster`），响应带 `Retry-After` 与 `error.details.retry_after_seconds`，两者固定为 60s；
 - Key 惩罚过滤跳过 `Weight=0` 的 Key：它们既不参与选择，也不计入候选数；
 - 候选集为空即表现为该集群的熔断：本次 attempt 不再轮换 Key，按 fallback 规则降级到备用集群；TTL 到期后 Key 自动恢复可用，无需人工介入。
 

@@ -43,6 +43,8 @@ The minimal configuration for first-time onboarding is as follows:
 
 **Instance Pool**: supports either **IP Mode** or **Provider Domain Mode**, one of the two.
 
+> **A third source: the K8s Pool**. When the instance source is a K8s pool, the pool name is a **dropdown** (data source: the read-only API `GET /open-api/v1/k8s_pools`), and the edit/detail pages render the instance table (address/port/weight) and the pool state from a **live query** to `GET /open-api/v1/k8s_pools/{name}` — a missing pool (404) and an empty pool each get their own hint; `disable` is read-only and no switch is rendered; the legal pool-name length is 128 characters. Providers store no instance mirror (there is no `k8s_instance_pool` field) — the instance list always comes from the live pool query. See "K8s Pool Provisioning" in [Chapter 10 Provider and Cluster Design](../design/chapter10-provider-and-cluster.md).
+
 IP Mode (the default) is suitable for self-built data centers / private deployments (vLLM / Xinference / Ollama, etc.) and allows creating multiple instance rows with "+ Create":
 
 | Field | Required | Default | Validation Rules |

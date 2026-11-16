@@ -368,6 +368,7 @@ sequenceDiagram
 | 场景 | 行为 |
 |------|------|
 | 双后端全过载 | utilization-filter fail-closed 过滤全部端点 → EPP 无候选 → BFE 静默回退本地 WRR 继续服务（`epp_fallback_local_total` 增长） |
+| **EPP 准入拒绝** | EPP 以 ext_proc `ImmediateResponse` 显式拒绝（429/503）时，BFE 映射为 429 `EPP_OVERLOAD` / 503 `EPP_NO_CAPACITY` 并透传 `Retry-After`；**不重试、不回退本地 WRR、不喂熔断**——过载场景表现为部分请求收到 429/503，而非全部放行排队"（区别于上两行的 fail-open 回退语义） |
 | 实例组内实例失联 | `EPPAddr` 仅含组内唯一实例地址，实例失联时 BFE 降级本地均衡；实例恢复后经 EPPCheck 滞回规则自动恢复 EPP 调用 |
 | EPP 实例故障 | BFE 经 EPPCheck 发现地址不可用，EPP 路径失败由本地 WRR 兜底（请求仍返回 200）；恢复路径为实例自愈，或控制面把 Cluster 重分配到健康实例组（reconciler 自动 / `PUT` 覆写），BFE 下次拉取 server_data_conf 切换地址 |
 | 分配悬空（实例组被移出池） | `/epp-pool` PATCH 触发自动重分配；池无可分配候选时清除分配，导出降级 WRR + error 日志，容量恢复后自动修复路径重新分配 |

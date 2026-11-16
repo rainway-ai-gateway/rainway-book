@@ -437,6 +437,22 @@ Taking the upgrade to v0.0.11 as another example, the matching requirements are:
 - BFE upgraded to v1.8.9, and evaluate as described in the previous section whether `bfe.conf` needs the `[AIKeyAffinity]` section added;
 - ai-gateway-epp and the frontend released in lockstep with AI Gateway API (the EPP-related components are mutually incompatible; a mixed deployment results in all-no-match EPP matching with an explicit alert).
 
+### Upgrading to v0.9.0 (BFE v1.9.0 + API v0.1.0)
+
+Target component combination: BFE v1.9.0, AI Gateway API v0.1.0, Dashboard v0.1.0, Log Reader v1.6.0, ai-gateway-observability v0.1.0, and bfe-access-pb v0.3.18; conf-agent v0.0.8, ai-gateway-epp v0.3.0, and ai-gateway-controller v1.1.0 can be kept as-is (no Reloader changes are needed for conf-agent).
+
+**Pre-upgrade checks (BFE v1.9.0 TLS stack migration — both are mandatory)**:
+
+1. If `mod_header` rule files (`header_rule.data` and other `mod_header` rules) reference `%tls_ja3_raw` / `%tls_ja3_hash`, they will be **rejected as a whole file** after the upgrade — delete or rewrite the references first; session-log consumers (text `ses_tls_client_random` / `ses_tls_server_random`, pb3 `HandshakeTime`) must adjust to the fields disappearing;
+2. For multi-instance deployments that ever enabled the Redis `[SessionCache]`: session resumption degrades to in-process session tickets and the handshake rate may rise — validate with load tests against the production topology. Also note that `HttpsBasic.MaxTlsVersion` now defaults to `VersionTLS13` (was `VersionTLS12`) and `MinTlsVersion` to `VersionTLS10` (was `VersionSSL30`), and `CipherSuites` line order no longer affects negotiation priority (pure whitelist); deployments without explicit settings may negotiate TLS 1.3 after upgrading.
+
+**Database changes**:
+
+- Control Plane database: no new tables or columns; the `providers.k8s_instance_pool` column definition has been removed from the DDL — **that column never shipped with v0.0.11**, so only databases that added the preview version need the manual step `ALTER TABLE providers DROP COLUMN k8s_instance_pool;`;
+- Reporting database: `bfe_ai_request_log` grows from 99 to **101 columns**. For the MySQL form, take the two `ALTER TABLE ... ADD COLUMN ... AFTER ai_intent_questions_version` statements from the header of `db_ddl_report_mysql.sql`; for the Doris / StarRocks / ClickHouse forms, run the scripts under `sqls/upgrade/2026-10-30-issue-1479-price-miss-columns/` in ai-gateway-observability (for Doris, **add the columns before rebuilding** the unique-key table; ClickHouse Kafka engine tables cannot be ALTERed and the ingest pipeline must be rebuilt per the HOWTO; StarRocks is a plain `ADD COLUMN`). Note the Doris/StarRocks target columns must be `BOOLEAN` / `VARCHAR(32)` — a TINYINT target silently writes JSON booleans as NULL.
+
+**Upgrade order (every step is mandatory)**: bfe-access-pb → BFE → AI Gateway API (may go first) + reporting-database DDL → Log Reader → observability schemas on the three backends → Dashboard. Consequences of reversing the order: log-reader fails writing 101 columns or the new columns stay NULL when the reporting database has not been altered; the three field groups (price-miss action, reasoning-content completion, penalty TTLs) all follow "BFE first, Control Plane second" — a reversed release shows "configurable in the console, not yet effective in the Data Plane".
+
 The recommended upgrade order is:
 
 1. Back up the database;

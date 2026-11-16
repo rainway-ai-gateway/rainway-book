@@ -281,7 +281,7 @@ End-to-end latency is under one minute (Routine Load commits in 1–5 seconds; t
 | Kafka | 2.8+ | Broker reachable; the `bfe_ai_log` topic created (adjust partition count and retention for your scale) |
 | Grafana | — | Installed, with its installation root directory known (containing `bin/` and `conf/provisioning/`) |
 | mysql client | any | Used to connect to the Doris FE and run deployment SQL |
-| log-reader | v1.5.0 | Deployed with BFE, with the `mod_kafka` plugin enabled |
+| log-reader | v1.6.0 | Deployed with BFE, with the `mod_kafka` plugin enabled |
 
 ### Step 1: Deploy the Doris-Side Objects
 
@@ -385,7 +385,7 @@ BFE (Data Plane)──access logs──▶ log-reader (mod_kafka) ──JSON─�
 | ClickHouse | 26.10+ | Cluster started, JSON type supported (development baseline 26.10); native TCP port reachable (9000 by default) |
 | Kafka | 2.8+ | Broker reachable; the `bfe_ai_log` topic created (adjust partition count and retention for your scale) |
 | clickhouse-client | matching the cluster version | Runs deployment SQL locally |
-| log-reader | v1.5.0 | Deployed with BFE, with the `mod_kafka` plugin enabled |
+| log-reader | v1.6.0 | Deployed with BFE, with the `mod_kafka` plugin enabled |
 
 ### Step 1: Deploy the ClickHouse-Side Objects
 
@@ -459,7 +459,7 @@ BFE (Data Plane)──access logs──▶ log-reader (mod_kafka) ──JSON─�
 | StarRocks | 3.5+ | FE started and MySQL-protocol port (default 9030) reachable |
 | Kafka | 2.8+ | Broker reachable; the `bfe_ai_log` topic created (adjust partition count and retention for your scale) |
 | mysql client | any | Used to connect to the SR FE and run deployment SQL; **must be invoked with `--skip-comments`** (the SR FE parser rejects statements that contain only comments; the mysql client sends comment lines as standalone statements by default, which raises a 1064 syntax error) |
-| log-reader | v1.5.0 | Deployed with BFE, with the `mod_kafka` plugin enabled |
+| log-reader | v1.6.0 | Deployed with BFE, with the `mod_kafka` plugin enabled |
 
 ### Step 1: Deploy the StarRocks-Side Objects
 

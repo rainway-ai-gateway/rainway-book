@@ -202,10 +202,11 @@ func (m *ModuleAITokenAuth) ValidateTargetModel(req *bfe_basic.Request, targetMo
 ### Key 惩罚与 Weight=0
 
 - 每次选择跳过 `Weight=0` 的 Key：权重为 0 表示该 Key 不参与选择，惩罚过滤也不把它计入候选数；
-- 上游返回 429 时，当前 Key 在本次请求内记为已用并轮换；开启会话亲和惩罚（`SessionAffinity` 且 `SessionAffinityPenaltyEnable`）时同时写入 60s 惩罚标记；
-- 上游返回 401/402/403 时，当前 Key 在本次请求内记为 dead；开启会话亲和惩罚时写入 3600s 惩罚标记；
-- 上游 5xx 或连接错误保持当前 Key 重试；其余 4xx（如 400）停止 Key 轮换且不惩罚；batch/file 的 404 是例外——清理该 batch 的绑定并对当前 Key 写入 60s 惩罚（开启会话亲和惩罚时），让后续操作重新绑定到持有该资源的 Key；
-- 惩罚过滤后候选集为空即熔断：不再回退到原始 Key 列表，惩罚中的 Key 必须等 TTL 到期才恢复。
+- 上游返回 429 时，当前 Key 在本次请求内记为已用并轮换；开启会话亲和惩罚（`SessionAffinity` 且 `SessionAffinityPenaltyEnable`）时同时写入 429 档惩罚标记，时长取自 `KeyPolicy.SessionAffinityPenaltyTTL429`（可配置，默认 60s）；
+- 上游返回 401/402/403 时，当前 Key 在本次请求内记为 dead；开启会话亲和惩罚时写入 auth 档惩罚标记，时长取自 `SessionAffinityPenaltyTTLAuth`（可配置，默认 **300s**）；
+- 上游 5xx 或连接错误保持当前 Key 重试；其余 4xx（如 400）停止 Key 轮换且不惩罚；batch/file 的 404 是例外——清理该 batch 的绑定并对当前 Key 写入 60s 惩罚（开启会话亲和惩罚时，固定 60s 不受两档配置影响），让后续操作重新绑定到持有该资源的 Key；
+- Key 尝试状态按 `AIConf.Keys` **下标空间**记账（与惩罚过滤后的子切片下标无关，避免把失败标记打到无辜 Key 上、或"藏住"健康的兄弟 Key 直接合成 429）；
+- 惩罚过滤后候选集为空即熔断：不再回退到原始 Key 列表，惩罚中的 Key 必须等 TTL 到期才恢复；TTL 归一规则：`0` 视为"用默认值"而非关闭，负数报配置错误，`>86400` 截断为 86400 并 Warn。
 
 ### 429 NO_AVAILABLE_KEY
 
@@ -903,7 +904,8 @@ type TokenAuthContext struct {
 - 配额预检拒绝（429）与 `KEY_DISABLED` / `KEY_EXPIRED` / `QUOTA_EXPIRED` / `SUBNET_NOT_ALLOWED` 等拒绝路径保留 API-Key tags 并写入访问日志 `ai_apikeytags`（702）与 `ClientKeyId`，拒绝行也能做 Entity 归属。
 - 批量与异步任务由 `mod_ai_batch` 支持：`/v1/files`、`/v1/batches` 识别为 `ModeFile` / `ModeBatch`（batch 流量不落入 chat 计费），上传行/字节计数与大文件流式转发（不重试缓冲），batch 级 key 亲和（SETNX 先到先得），后付费配额预留-结算-释放（`BATCH_RESERVE_BATCH` / `BATCH_SETTLED` 幂等），访问日志含 901-907 batch 字段。
 - 计费可靠性由 `AiBasicInfo` 的 `MarkResponseCompleted` / `MarkFinalUsageSeen` 两组标记支撑：客户端中断且未见到最终 usage 不扣费，估算值仅在响应正常完成时可用；`TokenAuthContext.deducted` 保证扣费幂等；`/count_tokens` 端点跳过计费。
-- 上游 Key 按 `AIConf.Keys` 加权选择并跳过 `Weight=0`；429 与 401/402/403 触发 Key 轮换，开启会话亲和惩罚时分别写入 60s / 3600s 惩罚，候选集为空时合成 429 `NO_AVAILABLE_KEY`（带 `Retry-After` 与 `error.details.retry_after_seconds=60`）；注入上游凭证前清理客户端凭证头、只保留本次注入的那一个，keyless 集群整体跳过选择与注入。
+- 上游 Key 按 `AIConf.Keys` 加权选择并跳过 `Weight=0`；429 与 401/402/403 触发 Key 轮换，开启会话亲和惩罚时分别写入 429 档 / auth 档惩罚（时长取 `SessionAffinityPenaltyTTL429` / `SessionAffinityPenaltyTTLAuth`，默认 60s / 300s，可配置），候选集为空时合成 429 `NO_AVAILABLE_KEY`（带 `Retry-After` 与 `error.details.retry_after_seconds=60`）；注入上游凭证前清理客户端凭证头、只保留本次注入的那一个，keyless 集群整体跳过选择与注入。
+- 配额欠费模型：扣减为全额 `DECRBY`（不做截断），Redis 余额允许为负；鉴权期 `HasBalance` 对负余额判无余额（429），并输出 `QuotaOverage` 计数 + WARN。
 - `total_token` 配额允许为 0（无余额计划，绑定请求被 429 拒绝），Redis 余额 key 不存在视为无余额而非内部错误。
 - 流式响应的 Token 用量由 `mod_body_process` 解析并累计（`message_delta` 保留 `message_start` 的 prompt/cache 字段），非流式响应由 `mod_ai_token_auth` 直接解析；usage 提取统一委托给 `bfe_model_protocol` 协议适配层，最终统一在 `HandleRequestFinish` 中扣减。
 

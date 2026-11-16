@@ -136,7 +136,7 @@ var APIKeyCreateRoute = &xreq.Endpoint{
 4. 判断所需 Action 是否被允许；
 5. 若 `authorizer.ValidateProduct == true`，再调用 `IsVisitorProductGranted` 校验产品线绑定关系。
 
-> 注：当前 OpenAPI 已移除 `Product` Scope，`user_products` 表继续保留，供未来多租户扩展。
+> 注：当前 OpenAPI 不含 `Product` Scope，`user_products` 表继续保留，供未来多租户扩展。
 
 ### 用户角色（role）
 

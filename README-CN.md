@@ -6,20 +6,21 @@
 
 ## 版本说明
 
-本书会随着壬远AI网关的升级而持续更新。本书的当前版本对应 **壬远AI网关 v0.8.0**，release 地址：<https://github.com/rainway-ai-gateway/ai-gateway/releases/tag/v0.8.0.0>。
+本书会随着壬远AI网关的升级而持续更新。本书的当前版本对应 **壬远AI网关 v0.9.0**，release 地址：<https://github.com/rainway-ai-gateway/ai-gateway/releases/tag/v0.9.0.0>。
 
-v0.8.0 包含以下组件版本：
+本书内容对应以下组件版本：
 
 | 组件 | 版本 | 说明 |
 |---|---|---|
-| AI Gateway API | v0.0.11 | 控制面 |
-| AI Gateway EPP | v0.0.2 | EPP 智能调度 |
-| BFE | v1.8.9 | 数据面 |
-| Dashboard | v0.0.11 | 控制台（内嵌于 API 镜像） |
+| AI Gateway API | v0.1.0 | 控制面 |
+| AI Gateway EPP | v0.3.0 | EPP 智能调度 |
+| BFE | v1.9.0 | 数据面 |
+| Dashboard | v0.1.0 | 控制台（内嵌于 API 镜像） |
 | conf-agent | v0.0.8 | 配置热加载代理 |
-| Log Reader | v1.5.0 | 访问日志 → Kafka / MySQL（mod_kafka / mod_log_mysql） |
+| Log Reader | v1.6.0 | 访问日志 → Kafka / MySQL（mod_kafka / mod_log_mysql） |
 | ai-gateway-controller | v1.1.0 | Kubernetes 控制器：Service/Endpoints 发现 → InnerAPI `k8s_pools` |
-| ai-gateway-observability | v0.0.2 | 报表标准形态：Doris / ClickHouse / StarRocks 对接资产与部署脚本 |
+| ai-gateway-observability | v0.1.0 | 报表标准形态：Doris / ClickHouse / StarRocks 对接资产与部署脚本 |
+| bfe-access-pb | v0.3.18 | 访问日志协议（含 `ai_price_warn`、`ai_client_closed_after_complete` 字段） |
 
 ## 全书目录
 
@@ -92,7 +93,7 @@ v0.8.0 包含以下组件版本：
 - `ai-gateway-controller/`：Kubernetes 控制器（Service/Endpoints 发现 → InnerAPI `k8s_pools`）
 - `conf-agent/`：配置代理
 - `ai-gateway-web/`：管理控制台（Dashboard）前端
-  - 控制台详细使用说明见：<https://github.com/rainway-ai-gateway/ai-gateway-web/tree/refs/tags/v0.0.11/docs/zh-cn>
+  - 控制台详细使用说明见：<https://github.com/rainway-ai-gateway/ai-gateway-web/tree/refs/tags/v0.1.0/docs/zh-cn>
 
 ## 版权许可
 

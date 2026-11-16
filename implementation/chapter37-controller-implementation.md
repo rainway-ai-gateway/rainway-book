@@ -127,28 +127,19 @@ k8s_<namespace>_<service>_<port>[_<cluster>]
 
 ## 与控制面和数据面的链路
 
-控制器只负责把实例写入 `k8s_pools`。从池到数据面的剩余链路全部在 AI Gateway API 内完成，并在单个数据库事务内扇出：
-
-1. 写入或删除 `k8s_pools` 行；
-2. 查出所有 `instance_source=k8s_pool` 且 `k8s_pool_name` 等于该池名的 Provider；
-3. 刷新各 Provider 的只读镜像 `k8s_instance_pool`（`PUT` 为新列表，`DELETE` 为空列表）；
-4. 逐个触发引用 Provider 的 Cluster 派生池同步，`cluster_table` 版本随导出签名自动更新。
-
-任一步失败整个事务回滚，因此 Provider 镜像、Cluster 派生池与池成员始终一致。Provider 引用哪个池由运维通过 OpenAPI 的 `instance_source` 与 `k8s_pool_name` 声明，控制器不修改 Provider 或 Cluster 配置。
+控制器只负责把实例写入 `k8s_pools`，从池到数据面的剩余链路全部在 AI Gateway API 内完成，且不做任何扇出：`PUT` / `DELETE` 只维护 `k8s_pools` 表本身，不写 Provider 镜像（Provider 响应与库表均无 `k8s_instance_pool` 字段）与 Cluster 派生池；实例在消费时由 `InstancePoolResolver` 按 `k8s_pool_name` 实时查询解析（详见 [第十章 Provider 与 Cluster 设计](../design/chapter10-provider-and-cluster.md)「有效实例池契约」）。`DELETE` 被引用池的语义为“保留池记录 + 清空实例”（详情查询返回 `instance_count=0`）。Provider 引用哪个池由运维通过 OpenAPI 的 `instance_source` 与 `k8s_pool_name` 声明，控制器不修改 Provider 或 Cluster 配置。
 
 ```mermaid
 flowchart LR
     S["Service / Endpoints<br/>Ready 地址"] -->|watch| C[ai-gateway-controller]
     C -->|"PUT /inner-api/v1/k8s_pools/{name}/instances"| A["AI Gateway API<br/>k8s_pools 表"]
-    A -->|"扇出：刷新只读镜像"| P["Provider<br/>k8s_instance_pool"]
-    A -->|"扇出：触发派生池同步"| CL["Cluster 派生池"]
-    P -->|有效实例池| CL
-    CL --> CT["cluster_table 导出"]
+    A -->|"消费时实时解析"| R["InstancePoolResolver"]
+    R --> CT["cluster_table 导出"]
     CT -->|InnerAPI| CA[Conf Agent]
     CA -->|热加载| B[BFE]
 ```
 
-从 Provider 的视角看，「池不存在」与「池存在但零实例」是同一状态：有效实例池为空。此时 Cluster 派生池被同步清空，`cluster_table` 导出空条目，BFE 可以正常加载配置，该 Cluster 的请求返回 500（`BK_NO_BACKEND`），由告警覆盖。这一语义保证了下游消费方只需处理一种空状态。
+从 Provider 的视角看，「池不存在」与「池存在但零实例」是同一状态：有效实例池为空。此时 K8s 模式 Cluster 的派生池为空占位，`cluster_table` 导出空条目，BFE 可以正常加载配置，该 Cluster 的请求返回 500（`BK_NO_BACKEND`），由告警覆盖。这一语义保证了下游消费方只需处理一种空状态。
 
 ---
 
@@ -183,7 +174,7 @@ flowchart LR
 - ai-gateway-controller 是 K8s 实例池成员的唯一写入方：监听带 `ai-gateway-api-name` 标签的 Service 与同名 Endpoints，按具名端口把 Ready 实例经 InnerAPI 全量上报，不直接接触数据库或 BFE。
 - 过滤由命名空间、标签与端口名三层条件组成；实例取自 Ready 地址并去重，池名按 `k8s_<namespace>_<service>_<port>[_<cluster>]` 生成，超长时折叠为前缀加哈希。
 - `PUT` 全量替换幂等、`DELETE` 404 视为成功、无 Ready 地址上报空数组；annotation 记录池名用于差集清理，finalizer 保证 Service 删除前先删池，结果同时写入 Event 与 `<service>.result` ConfigMap。
-- 池到数据面的扇出由 AI Gateway API 在单事务内完成：刷新 Provider 的 `k8s_instance_pool` 镜像并同步 Cluster 派生池，最终经 `cluster_table` 导出到 BFE；单副本部署与「先升级 API 再升级控制器」的顺序是稳定运行的前提。
+- 池到数据面的流转自 API v0.1.0 起由"事务内扇出到 Provider 镜像 + Cluster 派生池"改为消费时实时解析（`InstancePoolResolver`），`cluster_table` 导出随查询即时反映池内容；被引用池删除保留行并清空实例；单副本部署与「先升级 API 再升级控制器」的顺序是稳定运行的前提。
 
 ---
 

@@ -68,8 +68,8 @@ Provider（提供商）回答的是“下游是谁、能访问哪些模型、如
 - `keys`：API-Key 列表，每项包含 `name` 与 `key`（密钥值）。`name` 用于 cluster 引用。落库时该字段所在列 `providers.api_keys` 为 `MEDIUMTEXT`，整个 key 池序列化为单个 `enc$v1$` 信封密文（不是逐字段加密）；配置 `[Security].MasterKeyFile` 时控制面启动自检该列类型，仍为 JSON 类型则拒绝启动，读路径遇到无法解密的坏值返回 500（见 [第十七章 安全设计](./chapter17-security-design.md)）。下发配置文件中的密钥同样以信封形式传输，仅数据面加载后以明文使用。
 - `instance_pool`：后端实例池。实例来源为手工维护（缺省）时，至少包含一个实例，且至少有一个实例的 `weight > 0`；实例来源为 K8s 实例池时该字段不参与校验，详见下文「K8s 实例池供给」。
 - `instance_source`：实例供给方式，`instance_pool`（手工维护，缺省）或 `k8s_pool`（K8s 发现组件维护）。
-- `k8s_pool_name`：`instance_source=k8s_pool` 时必填，引用的 K8s 实例池名。
-- `k8s_instance_pool`：K8s 实例池的只读镜像，由控制面从 `k8s_pools` 表同步，请求体携带该字段返回 422。
+- `k8s_pool_name`：`instance_source=k8s_pool` 时必填，引用的 K8s 实例池名；合法长度 **128** 个字符。
+- `k8s_instance_pool`：**当前 API 已不含此字段**。Provider 不存储实例镜像，消费方（cluster 实例快照、导出、报表关联）按 `k8s_pool_name` 实时查询 `k8s_pools` 表；请求体携带该字段按未知字段静默忽略。详见下文「K8s 实例池供给」。
 - `model_protocols`：支持的模型访问协议，当前枚举为 `openai`、`anthropic`、`gemini`，至少包含一种。
 - `protocol_paths`：可选，协议 → 上游 base path 的声明式映射，用于将标准入口 `/v1/...` 改写为 provider 原生前缀，详见下文「协议路径改写」。
 - `time_zone` / `tiers`：用于高峰/闲时价格匹配，初期只支持 `peak` tier。
@@ -152,7 +152,9 @@ Cluster（集群）回答的是“流量如何转发、用哪些模型、key 权
 - `llm_config`：AI LLM 服务配置，必须包含 `provider`，且 `models` 必须是所属 provider `models` 的子集。
 - `llm_config.keys`：只保留 `name` 与 `weight`，`name` 必须引用 provider 中存在的 key。
 - `llm_config.key_policy`：多 Key 选择策略与重试退避，当前 `strategy` 仅支持 `weighted_random`。
-- `llm_config.key_affinity`：基于 Redis + `ClientKeyId` 的会话级 Key 亲和性。
+- `llm_config.key_affinity`：基于 Redis + `ClientKeyId` 的会话级 Key 亲和性，支持两档惩罚时长配置（见下文「Key Affinity」）。
+- `llm_config.price_miss_action`：可选，缺价处置三态（`fallback_chat` / `bill_zero` / `reject`，缺省 `fallback_chat`），详见 [第十三章 模型定价与成本核算设计](./chapter13-model-pricing.md)。
+- `llm_config.ensure_reasoning_content`：可选，思考模式推理内容补齐协议列表（仅 `openai` / `anthropic`，空 = 关闭），详见 [第七章 数据面转发设计：BFE](./chapter07-data-plane-design.md)。
 - `llm_config.normalize_upstream_error`：可选的上游错误归一化配置，详见下文「上游错误归一化」。
 
 ## Provider 与 Cluster 解耦的原因与收益
@@ -233,27 +235,26 @@ Provider 与 Cluster 解耦后，二者各自拥有独立的生命周期，但�
 
 ### 实例来源双模式
 
-`providers` 表以三个字段表达实例来源双模式：
+`providers` 表以两个字段表达实例来源双模式（库表与响应均无 `k8s_instance_pool` 镜像列）：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `instance_source` | `VARCHAR(32)`，默认 `instance_pool` | 实例供给方式：`instance_pool` 表示实例列表由人手工维护；`k8s_pool` 表示实例由 K8s 发现组件供给 |
 | `k8s_pool_name` | `VARCHAR(255)`，可空 | `instance_source=k8s_pool` 时必填，引用的 K8s 实例池名 |
-| `k8s_instance_pool` | JSON，可空 | K8s 实例池的只读镜像，由控制面从 `k8s_pools` 表同步写入；OpenAPI 请求体携带该字段返回 422 |
 
-`k8s_pool_name` 的命名规范为 1-64 个字符，仅允许字母、数字与 `_`、`-`、`.`，且不得以 `.`、`-`、`_` 开头或结尾。引用无需预先存在：池不存在等价于零实例，等待发现组件首次同步后实例自动出现。
+`k8s_pool_name` 的命名规范为 **1-128** 个字符，仅允许字母、数字与 `_`、`-`、`.`，且不得以 `.`、`-`、`_` 开头或结尾。引用无需预先存在：池不存在等价于零实例，等待发现组件首次同步后实例自动出现。
 
 ### 有效实例池契约
 
-`model/iprovider/provider.go` 中的 `EffectiveInstancePool()` 定义了有效实例池契约，是下游消费实例池的唯一入口：
+有效实例池不在 Provider 上存储镜像，而是由 `InstancePoolResolver` 在消费时按 `k8s_pool_name` 实时查询 `k8s_pools` 表解析（`model/iprovider/provider.go` 的 `EffectiveInstancePool()` 为下游统一入口）：
 
 ```text
-EffectiveInstancePool(p) = p.instance_source == "k8s_pool" ? p.k8s_instance_pool : p.instance_pool
+EffectiveInstancePool(p) = p.instance_source == "k8s_pool" ? 实时查询 k8s_pools[p.k8s_pool_name] : p.instance_pool
 ```
 
-- cluster 创建实例快照、实例池同步、变更判等全部经由该契约读取有效池，不直接触碰 `instance_pool` / `k8s_instance_pool` 原始字段。
-- 当写入合并后的 `instance_source` 解析为 `instance_pool` 时，`k8s_instance_pool` 镜像被强制清空——`instance_pool` 模式下镜像恒为空。
-- 合法空池只出现在 `k8s_pool` 模式：有效池为空时，引用该 provider 的 cluster 以空条目下发，BFE 加载接受，该 cluster 的请求返回 500（`BK_NO_BACKEND`，message `no available backend for this request`），须配合告警使用；`cluster_table` 中缺失的子集群同样按空 backend 处理，热加载释放旧实例后也会出现同一错误。`instance_pool` 模式下的非空校验（至少一个实例、(addr, port) 去重、至少一个 `weight > 0`）保持不变。
+- cluster 实例快照、实例池同步、变更判等、导出与报表关联全部经由该契约读取有效池，不直接触碰 `instance_pool` 原始字段；池名为空或池不存在返回空列表，读取失败 fail-close（返回空）。
+- 实时解析保证创建顺序无关：无论 provider 创建于池 `PUT` 之前还是之后，都能解析到当前池实例。
+- 合法空池只出现在 `k8s_pool` 模式：有效池为空时，K8s 模式 cluster 的派生池为空占位（不承载实例），引用该 provider 的 cluster 以空条目下发，BFE 加载接受，该 cluster 的请求返回 500（`BK_NO_BACKEND`，message `no available backend for this request`），须配合告警使用；`cluster_table` 中缺失的子集群同样按空 backend 处理。`instance_pool` 模式下的非空校验（至少一个实例、(addr, port) 去重、至少一个 `weight > 0`）保持不变。
 
 ### k8s_pools 表与维护端点
 
@@ -264,9 +265,20 @@ EffectiveInstancePool(p) = p.instance_source == "k8s_pool" ? p.k8s_instance_pool
 | `PUT /inner-api/v1/k8s_pools/{name}/instances` | 全量替换实例列表，请求体为裸 JSON 数组；实例 `addr` 必填、`port` 取值 1-65535、`weight` 取值 [0,100] 缺省 100，(addr, port) 组合池内唯一；空数组合法，等价于零实例 |
 | `GET /inner-api/v1/k8s_pools` | 池列表，含 `instance_count` / `last_sync_time` |
 | `GET /inner-api/v1/k8s_pools/{name}` | 单池查询，池不存在返回 404 |
-| `DELETE /inner-api/v1/k8s_pools/{name}` | 删池无引用保护，引用该池的 provider 镜像随之清零 |
+| `DELETE /inner-api/v1/k8s_pools/{name}` | 删池；被 Provider 引用的池“保留池记录 + 清空实例”（详情查询返回 200、`instance_count=0`），无引用时物理删除 |
 
-写入成功后，控制面在单事务内完成扇出（`model/ik8s_pool/k8s_pool.go` 的 `K8sPoolManager.ReplaceInstances` / `DeletePool`）：刷新所有引用该池的 provider 的 `k8s_instance_pool` 镜像，并同步更新引用 cluster 的派生实例池；空池同样参与同步，即 clear 语义。扇出任一步失败，整个写入回滚，保证池记录、provider 镜像与 cluster 派生池三者一致。
+写入路径不做扇出：`PUT` / `DELETE` 只维护 `k8s_pools` 表本身（`model/ik8s_pool/k8s_pool.go` 的 `K8sPoolManager.ReplaceInstances` / `DeletePool`），不写 providers / clusters / pools 派生数据；实例在消费时按 `k8s_pool_name` 实时解析（见上节「有效实例池契约」）。
+
+### 只读查询
+
+控制面对 K8s 实例池提供**只读 OpenAPI**（鉴权 `FeatureK8sPool` + `ActionRead`，不开放写接口、不分页）：
+
+| 端点 | 说明 |
+|------|------|
+| `GET /open-api/v1/k8s_pools` | 池列表：`list[]`（`name` / `instance_count` / `last_sync_time`），无池返回 `[]` 而非 404 |
+| `GET /open-api/v1/k8s_pools/{name}` | 池详情：`name` + `instances[]`（`addr` / `port` / `weight` / `disable` 只读）+ `instance_count` + `last_sync_time`；池不存在 404、空池 200 |
+
+Dashboard 据此把 provider 页的池名输入呈现为下拉选择，并在编辑/详情页实时展示实例表。
 
 ## AIConf 的生成
 
@@ -493,7 +505,9 @@ Key Policy 与 Key Affinity 配合使用：Affinity 保证同一客户端优先�
     "enabled": true,
     "ttl": 600,
     "redis_prefix": "bfe:ai:key_affinity",
-    "penalty_enable": true
+    "penalty_enable": true,
+    "penalty_ttl_429": 60,
+    "penalty_ttl_auth": 300
 }
 ```
 
@@ -502,7 +516,11 @@ Key Policy 与 Key Affinity 配合使用：Affinity 保证同一客户端优先�
 - `enabled`：是否开启会话级 Key 亲和性。
 - `ttl`：绑定空闲超时时间，单位秒；命中绑定后 BFE 会刷新 TTL，持续请求则绑定保持。
 - `redis_prefix`：Redis key 前缀。
-- `penalty_enable`：是否开启 Key 惩罚；为 `true` 时，近期返回 429/401/403 的 Key 会被跳过。
+- `penalty_enable`：是否开启 Key 惩罚；为 `true` 时，近期返回 429/401/402/403 的 Key 会被跳过。
+- `penalty_ttl_429`：429 档惩罚时长（秒），默认 60，合法区间 [10, 600]。
+- `penalty_ttl_auth`：401/402/403 档惩罚时长（秒），默认 **300**，合法区间 [60, 1800]。`0`/负数/越界返回 422 且不落库；缩短配置不追改已存在的 Redis 惩罚键。
+
+`key_affinity` 为**整体替换**语义：只提交片段会按默认值补齐并重置其余子字段，改单个字段须先 GET 再提交完整 `llm_config`。控制面永不把 `0` 传给数据面（Redis `expire=0` 意味着永不过期），`key_affinity` 为 nil 的存量集群同样导出 60/300。
 
 Key Affinity 最终会映射到 `AIConf` 的 `SessionAffinity*` 相关字段下发给 BFE。
 
@@ -618,7 +636,7 @@ curl -X POST "http://api-server:8183/api/v1/providers/tools/discover-models" \
 - **解耦收益**：职责更清晰、配置更少重复、Cluster 不再暴露 key 明文、BFE 无感知、model-prices 与 provider 之间可弱引用。
 - **AIConf 生成**：控制面将 Provider 与 Cluster 的数据按 name join，生成 BFE 所需的实例池、子集群、`AIConf.Keys`、`AIConf.ModelTable`、`AIConf.ModelProtocols` 等字段。
 - **模型发现**：通过 `/providers/tools/discover-models` 探测第三方模型列表，再回填到 Provider。
-- **K8s 实例池供给**：`instance_source` 双模式（手工 `instance_pool` / K8s 发现组件维护的 `k8s_pool`），`EffectiveInstancePool()` 是下游唯一消费口；K8s 池由发现组件经 InnerAPI 独占写入，写入后单事务扇出刷新 provider 镜像与引用 cluster 的派生实例池。
+- **K8s 实例池供给**：`instance_source` 双模式（手工 `instance_pool` / K8s 发现组件维护的 `k8s_pool`），`EffectiveInstancePool()` 是下游唯一消费口；K8s 池由发现组件经 InnerAPI 独占写入，写入不扇出，实例在消费时按 `k8s_pool_name` 实时解析。
 - **Key 机制**：Cluster 通过 `name` 引用 Provider 的 key 并设置权重；`key_policy` 控制选择策略与重试退避；`key_affinity` 提供基于 Redis 的会话级 Key 亲和性。
 - **上游错误归一化**：`llm_config.normalize_upstream_error` 将上游错误按协议适配器统一映射为 `UPSTREAM_*` 错误目录，字段全部可选、缺省保持历史透传行为；导出映射为 `AIConf.NormalizeUpstreamError`，默认值由 BFE 加载期合成。
 

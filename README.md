@@ -6,20 +6,21 @@ This book is written for **users and developers of the Rainway AI Gateway**. It 
 
 ## Version Notes
 
-This book is continuously updated along with the Rainway AI Gateway releases. The current version of this book corresponds to **Rainway AI Gateway v0.8.0**. Release address: <https://github.com/rainway-ai-gateway/ai-gateway/releases/tag/v0.8.0.0>.
+This book is continuously updated along with the Rainway AI Gateway releases. The current version of this book corresponds to **Rainway AI Gateway v0.9.0**. Release address: <https://github.com/rainway-ai-gateway/ai-gateway/releases/tag/v0.9.0.0>.
 
-v0.8.0 includes the following component versions:
+The content of this book corresponds to the following component versions:
 
 | Component | Version | Description |
 |---|---|---|
-| AI Gateway API | v0.0.11 | Control Plane |
-| AI Gateway EPP | v0.0.2 | EPP scheduling |
-| BFE | v1.8.9 | Data Plane |
-| Dashboard | v0.0.11 | Management console (embedded in the API image) |
+| AI Gateway API | v0.1.0 | Control Plane |
+| AI Gateway EPP | v0.3.0 | EPP scheduling |
+| BFE | v1.9.0 | Data Plane |
+| Dashboard | v0.1.0 | Management console (embedded in the API image) |
 | conf-agent | v0.0.8 | Configuration hot reload agent |
-| Log Reader | v1.5.0 | Access log → Kafka / MySQL (mod_kafka / mod_log_mysql) |
+| Log Reader | v1.6.0 | Access log → Kafka / MySQL (mod_kafka / mod_log_mysql) |
 | ai-gateway-controller | v1.1.0 | Kubernetes controller: Service/Endpoints discovery → InnerAPI `k8s_pools` |
-| ai-gateway-observability | v0.0.2 | Standard reporting form: Doris / ClickHouse / StarRocks docking assets and deployment scripts |
+| ai-gateway-observability | v0.1.0 | Standard reporting form: Doris / ClickHouse / StarRocks docking assets and deployment scripts |
+| bfe-access-pb | v0.3.18 | Access log protocol (with `ai_price_warn` and `ai_client_closed_after_complete` fields) |
 
 ## Table of Contents
 
@@ -92,7 +93,7 @@ See [writing-guide.md](./writing-guide.md) (currently available in Chinese only)
 - `ai-gateway-controller/`: Kubernetes controller (Service/Endpoints discovery → InnerAPI `k8s_pools`)
 - `conf-agent/`: Configuration agent
 - `ai-gateway-web/`: Management console (Dashboard) frontend
-  - Detailed console usage documentation: <https://github.com/rainway-ai-gateway/ai-gateway-web/tree/refs/tags/v0.0.11/docs/zh-cn>
+  - Detailed console usage documentation: <https://github.com/rainway-ai-gateway/ai-gateway-web/tree/refs/tags/v0.1.0/docs/zh-cn>
 
 ## License
 

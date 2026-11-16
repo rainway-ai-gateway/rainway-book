@@ -3,7 +3,7 @@
 ## A
 
 **ai-gateway-controller（原名 Service Controller）**
-：部署在 Kubernetes 集群内的控制器，监听带 `ai-gateway-api-name` 标签的 Service 及其同名 Endpoints，按具名端口把 Ready 实例经 InnerAPI `PUT /inner-api/v1/k8s_pools/{name}/instances` 全量上报为 K8s 实例池；池成员由控制面扇出到 Provider 镜像与 Cluster 派生池，再经 `cluster_table` 导出到 BFE。
+：部署在 Kubernetes 集群内的控制器，监听带 `ai-gateway-api-name` 标签的 Service 及其同名 Endpoints，按具名端口把 Ready 实例经 InnerAPI `PUT /inner-api/v1/k8s_pools/{name}/instances` 全量上报为 K8s 实例池；控制面不做扇出，各消费方按 `k8s_pool_name` 实时查询有效池，再经 `cluster_table` 导出到 BFE。
 
 **AI 业务集群（Cluster）**
 ：引用 Provider 并配置转发策略的逻辑后端单元，决定流量如何转发、使用哪些模型、Key 权重如何分配。
@@ -47,7 +47,7 @@
 ## E
 
 **有效实例池（Effective Instance Pool）**
-：Provider 实际生效的后端实例集合（`k8s_pool` 模式下取 K8s 池镜像，否则取 `instance_pool`），控制面下游唯一消费口径。
+：Provider 实际生效的后端实例集合（`k8s_pool` 模式下实时查询 K8s 池，否则取 `instance_pool`），控制面下游唯一消费口径。
 
 **Entity（组织）**
 ：调用方分组，可表达部门、团队或项目。每个 Entity 可挂载配额计划、限流策略、模型黑白名单与路由规则。
@@ -93,7 +93,10 @@
 ：由 ai-gateway-controller 经 InnerAPI `/inner-api/v1/k8s_pools` 全量上报和维护的后端实例集合，池成员的唯一写入方是该控制器；Provider 可切换实例来源（`instance_pool` / `k8s_pool`），以有效实例池契约下发。
 
 **Key Affinity（Key 亲和性）**
-：基于 Redis 实现会话级 Key 亲和，同一 `ClientKeyId` 在一定时间内持续命中同一 Provider Key；Redis 连接由 `bfe.conf` 的 `[AIKeyAffinity]` 配置段自持。
+：基于 Redis 实现会话级 Key 亲和，同一 `ClientKeyId` 在一定时间内持续命中同一 Provider Key；Redis 连接由 `bfe.conf` 的 `[AIKeyAffinity]` 配置段自持。惩罚时长可配置（`penalty_ttl_429` 默认 60s、`penalty_ttl_auth` 默认 300s）。
+
+**expr 条件引擎（Expression Engine）**
+：基于 expr-lang/expr 的条件表达式引擎（`bfe_expr` 包），与 53 个既有条件原语并存；`bfe.conf` 的 `ConditionEngineMode` 控制 `LegacyFirst`（默认）/ `ExprCompatible` / `ExprOnly` 三种模式，动作参数支持 `=expr` 动态求值。
 
 ## M
 
@@ -127,6 +130,12 @@
 
 **protocol_paths（协议路径映射）**
 ：Provider 上的可选字段，声明各模型协议（`openai`/`anthropic`）对应的上游 base path；BFE 据此将标准入口 `/v1/...` 改写为 provider 原生前缀，未配置则原样透传（`gemini` 协议不支持路径改写）。
+
+**缺价处置（PriceMissAction）**
+：集群级配置 `llm_config.price_miss_action`，模型/模式无价格条目时的三态行为：`fallback_chat`（缺省，按同模型 chat 价计费）/ `bill_zero`（按 0 计费）/ `reject`（转发前拒绝，503 `PRICE_NOT_CONFIGURED`）；信号经 `ai_price_miss` / `ai_price_warn` 访问日志字段全链路上报。
+
+**配额欠费（Quota Overage）**
+：余额模型：配额扣减不截断到 0，Redis 余额允许为负，欠费如实记录；鉴权对负余额继续拒绝（429），对外 `remaining` 展示 0、`used` 可大于 `quota`。
 
 **配额不足时放行**
 ：配额计划的可选开关；开启后配额余额扣减到 0 仍放行请求（继续统计用量），适合试运行阶段；关闭时余额不足即拒绝。
@@ -174,6 +183,9 @@
 
 **Tier（时段层级）**
 ：模型定价中按时间维度划分的价格层级，初期仅支持 `peak`（忙时）；忙时时间段定义在服务商资源中维护（分段计价配置）。
+
+**推理内容补齐（EnsureReasoningContent）**
+：集群级配置 `llm_config.ensure_reasoning_content`（协议列表，仅 `openai`/`anthropic`，空 = 关闭）；对要求回传 `reasoning_content` 的思考模式上游，BFE 在校验窗口内对 assistant 消息定点补齐空值，避免路由切换后首个请求被上游 400 拒绝。
 
 **Token**
 ：由 `/auth/tokens` 创建的程序访问凭证，Scope 取值为 `System`（完整管理权限）、`SystemReadonly`（只读管理权限）与 `Support`（只读导出权限）。

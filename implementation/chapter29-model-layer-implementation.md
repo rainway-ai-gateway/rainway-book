@@ -54,7 +54,7 @@ model/
 - `route_rules`：管理 Global / Entity / API-Key 三级 AI 路由规则。
 - `shared`：提供跨包共享的 Param、Filter、Storager 接口，以及路由规则、配额余额等通用结构。
 - `itxn`：提供最小化的事务抽象，是整个模型层一致性的基石。
-- `icluster_conf` / `iprovider` / `imodel_price`：分别负责集群转发策略、Provider 接入能力、模型定价等与数据面导出密切相关的资源。其中 `model/iprovider` 还承载实例来源双模式（`instance_source` / `k8s_pool_name` / `k8s_instance_pool` 三字段）与有效实例池契约 `EffectiveInstancePool()`（K8s 池优先，下游经此唯一入口消费实例池），详见 [第十章 Provider 与 Cluster 设计](../design/chapter10-provider-and-cluster.md)。
+- `icluster_conf` / `iprovider` / `imodel_price`：分别负责集群转发策略、Provider 接入能力、模型定价等与数据面导出密切相关的资源。其中 `model/iprovider` 还承载实例来源双模式（`instance_source` / `k8s_pool_name` 两字段，Provider 不存储实例镜像）与有效实例池契约（`InstancePoolResolver` 按 `k8s_pool_name` 实时查询 `k8s_pools` 表，池名空/池不存在返回空列表、读取失败 fail-close；下游经此唯一入口消费实例池），详见 [第十章 Provider 与 Cluster 设计](../design/chapter10-provider-and-cluster.md)。
 - `ai_cache` / `ai_context` / `traffic_mirror` / `iintent_config` / `ik8s_pool`：AI 缓存规则、上下文压缩规则、流量镜像规则、意图配置单例与 K8s 实例池五个规则类资源域，沿用同一套 Manager + Storager 惯例；三个规则集合域在 Manager 内以单事务 delete-all + insert-all 实现集合整体替换，意图配置与两个全局设置为单行覆盖。
 
 ## Param / Filter / Storager / Manager 四层抽象

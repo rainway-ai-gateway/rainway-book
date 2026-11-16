@@ -695,6 +695,55 @@ When `ProtocolPaths` is not configured or has no entry for the detected protocol
 
 Model rewriting (overriding the body's `model` field, prefix stripping, and `ModelMapping`) applies only to JSON inference requests. Requests in `ModeFile` / `ModeBatch` and those with a non-JSON `Content-Type` skip the `shouldRewriteBodyModel` check: the multipart body of `/v1/files` is passed through unchanged, and `/v1/batches` gets no `model` field injected. The semantics of batch tasks and file uploads are decided entirely by the upstream Provider; the gateway only performs authentication, routing, and quota checks, without any model-related body rewriting.
 
+## Key Capabilities
+
+BFE provides the following capabilities along four themes — expression capability, billing completeness, upstream-contract adaptation, and enterprise-grade TLS — all driven by Control Plane API configuration and exposed in Dashboard forms.
+
+### Conditional Expression Engine (expr)
+
+Route conditions and module rules support two coexisting syntaxes: the traditional BFE primitives (`req_host_in`, `res_code_in`, etc., 53 in total) and a condition engine based on expr-lang/expr (the `bfe_expr` package), in which the legacy primitives are available as function-wrapped compatibility functions:
+
+- `bfe.conf [Server]` has the `ConditionEngineMode` switch with three modes: `LegacyFirst` (default; legacy engine first, falling back to expr on failure), `ExprCompatible` (expr and legacy primitives mixed; compile errors are rejected), and `ExprOnly` (pure expr; legacy primitive names are unknown functions). Numeric `0/1/2` and any case are accepted; **invalid values fail startup**; the mode is process-wide — hot reload does not apply, and changing it requires a restart.
+- Action parameters of shared actions in `mod_redirect`, `mod_header`, etc. support the `=expr` prefix (compiled and type-checked at load time; the result must be a string), coexisting with `==literal` (escaped) and plain literals; a runtime evaluation failure empties that parameter with a warning and does not block the other parameters of the same action.
+- Dynamic data sources: `RedisEnv` is fully usable (`Get`/`GetInt`/`HGetAll`; misses and errors return zero values without failing; default conn 100ms / read 300ms / write 300ms), while `HttpEnv`/`GlbEnv`/`ConfEnv` are interface stubs for now.
+
+All expr compilation happens at configuration load time; at runtime only evaluation executes; expression errors are treated as `false` plus a warning and never fail the request. The default `LegacyFirst` mode reproduces legacy behavior byte-for-byte. Note the intentional differences between the engines: string escapes follow Go rules (a regex `\.` must be written `\\.` / backquoted / `[.]` in expr); legacy `res_code_in` compares strings while the modern `ResCode()` compares integers; hash empty-input bucket semantics differ. They only surface under `ExprCompatible`/`ExprOnly`.
+
+### Price-Miss Actions (PriceMissAction)
+
+Behavior when a model price is missing is governed by an explicit three-state cluster-level configuration `AIConf.PriceMissAction`: `fallback_chat` (default; bill at the same model's chat price), `bill_zero` (forward but bill 0), and `reject` (**reject before forwarding**: 503 `PRICE_NOT_CONFIGURED`, no upstream call, no billing, while the access log row is still written). A missing `ModelTable` as a whole is treated as unpriced. Signals are reported end-to-end through the access-log fields `ai_price_miss` / `ai_price_warn` (six forms); see [Chapter 15 Observability Design](./chapter15-observability.md).
+
+### Reasoning-Content Completion (EnsureReasoningContent)
+
+Some reasoning-mode upstreams require `reasoning_content` to be echoed back (a missing field or `null` is rejected with 400), yet the assistant message after a route switch comes from the previous backend. `AIConf.EnsureReasoningContent` (a protocol list; empty = disabled; only `openai`/`anthropic`) instructs BFE to patch empty values into assistant messages within the validation window inside `doSingleAIForward` (written via sjson with field order and all other bytes unchanged; existing non-empty values are never touched). Non-JSON bodies, compressed bodies, batch/file requests, `/responses`, and oversized bodies are passed through untouched. Counters `ReasoningPatched` / `ReasoningSkip` / `ReasoningFail` / `ReasoningStill400` are provided, where `ReasoningStill400` is the exit signal that the upstream contract has changed.
+
+### Configurable Key Penalty TTL
+
+Key-affinity penalty TTLs are cluster-level configuration `AIConf.KeyPolicy.SessionAffinityPenaltyTTL429` / `SessionAffinityPenaltyTTLAuth` (defaults **60 / 300**; `0` means "use the default" rather than disabled; negative values are config errors; values `>86400` are truncated with a warning). Shortening the configuration does not retroactively update existing Redis penalty keys, and the batch/file 404 penalty stays fixed at 60s. See [Chapter 9 Entity and API-Key Design](./chapter09-apikey-design.md).
+
+### Quota Overage Model
+
+Quota deduction is a full `DECRBY`, so the balance **may go negative** (overages recorded faithfully); `HasBalance` treats a negative balance as no balance at request time (429). The console's "used" may exceed the quota cap, while `Remaining` is still displayed as 0. See [Chapter 12 Quota and Rate Limit Design](./chapter12-quota-and-rate-limit.md).
+
+### Billing and Usage-Collection Completeness
+
+- **Compressed-stream usage collection**: when the upstream compresses SSE via `Accept-Encoding`, the stream is no longer bypassed into byte-by-byte passthrough — `CompressedStreamDecoder` forwards the compressed bytes unchanged while a decompressed copy feeds usage parsing only (with a plaintext budget against zip bombs); `bfe.conf [Server]` provides `AIUpstreamAcceptEncoding` (`auto` by default / `identity` / `off`) to narrow outbound negotiation to the decodable set.
+- **Client abort and upstream drops**: with `EstimateToken=true`, a client-side stream abort is billed by estimation over the forwarded content (`ai_usage_source=aborted`); a mid-stream upstream drop is attributed separately (`upstream_dropped`) and, by default, a protocol error event is appended to the client stream (disable via `NormalizeUpstreamError.StreamTruncatedError`).
+- **Non-2xx rows record usage**: the `ai_total_tokens` caliber unifies to `in + out`; non-2xx rows also record in/out/total (`ai_usage_source=failed`), while `ai_cost_value` is written only for 2xx.
+
+### EPP Admission-Rejection Passthrough
+
+When EPP returns an ext_proc `ImmediateResponse` (429/503), BFE maps it to 429 `EPP_OVERLOAD` / 503 `EPP_NO_CAPACITY` and passes through `Retry-After`; the request is **not retried, does not fall back to local balancing, and does not feed the circuit breaker** — overload scenarios partially reject with 429/503 instead of admitting everything and queueing.
+
+### TLS Stack (read before upgrading)
+
+BFE's TLS is built on the standard library `crypto/tls` (certificates and verification logic plug in through the `GetCertificate` / `GetConfigForClient` / `VerifyConnection` callbacks) and **supports TLS 1.3**:
+
+- `HttpsBasic.MaxTlsVersion` defaults to `VersionTLS13` and `MinTlsVersion` to `VersionTLS10` — when upgrading from an older release without explicit settings, clients may negotiate TLS 1.3;
+- `CipherSuites` degrades from "config line order is priority" to a **pure whitelist** (the actual order follows the standard library's fixed table), and `PreferServerCipherSuites` becomes a no-op;
+- Deprecated fields remain parseable but are ignored: `EnableSslv2ClientHello`, all `[SessionCache]` fields (there is no Redis TLS session cache; session resumption uses in-process session tickets), `SessionTicketKeyName`, and the tls_rule_conf `Grade` / `Chacha20` / `DynamicRecord` fields;
+- **Things that fail configuration loading**: the standard-library TLS provides no `mod_header` built-in variables `tls_ja3_raw` / `tls_ja3_hash`; any `header_rule.data` referencing them is rejected as a whole file (clean up the references before upgrading from an older release). The text session log has no `ses_tls_client_random` / `ses_tls_server_random` fields, and pb3 does not write `HandshakeTime`.
+
 ## Chapter Summary
 
 This chapter introduced the design of BFE, the Data Plane component of the Rainway AI Gateway.
@@ -709,6 +758,7 @@ This chapter introduced the design of BFE, the Data Plane component of the Rainw
 - Configuration loading adopts a two-layer INI + JSON structure, supports hot reload through the web interface, and new configurations atomically replace the old ones after validation completes.
 - `mod_ai_route` supports three-level routing of `apikey → entity → global`, weighted selection of `targets`, and sequential degradation of `fallbacks`, and is the core of AI Gateway forwarding.
 - Upstream path rewriting by protocol: for the `openai` branch of `AIConf.ProtocolPaths`, an optional `/v1` prefix is stripped and the shared endpoint table in `bfe_basic` decides whether to rewrite (both `/chat/completions` and `/v1/chat/completions` get the provider prefix); the `anthropic` branch recognizes only the standard `/v1` entry, and gemini is never rewritten; the rewrite only affects the outbound copy, and every fallback attempt recomputes it independently.
+- The condition engine supports expr (`ConditionEngineMode` three modes; the default `LegacyFirst` reproduces legacy-primitive behavior) and action parameters support `=expr`; price-miss actions (`PriceMissAction`), reasoning-content completion (`EnsureReasoningContent`), configurable Key penalty TTLs, and the quota overage model are all cluster-level configuration; compressed-SSE usage collection, abort/drop billing attribution, and non-2xx usage recording close the billing bypasses; TLS is standard-library based with TLS 1.3 support — clean up JA3 variable references and evaluate the default-version changes before upgrading.
 
 ## References
 
